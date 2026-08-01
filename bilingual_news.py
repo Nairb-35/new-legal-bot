@@ -4,7 +4,7 @@ from deep_translator import GoogleTranslator
 
 # Credentials
 TELEGRAM_BOT_TOKEN = "8900887284:AAEHQE1ufmrJc5zA_Lb3C_HpvokTLP59AHo"
-TELEGRAM_CHAT_ID = "@brian_law_news"
+TELEGRAM_CHAT_ID = "-1004348673663"
 
 # RSS Feed Source
 FEED_URL = "https://news.google.com/rss/search?q=(law+OR+court+OR+parliament+OR+judgment+OR+bill+OR+policy)+site:thestar.com.my+OR+site:bharian.com.my+OR+site:freemalaysiatoday.com+OR+site:malaysianbar.org.my+OR+site:jurist.org+OR+site:nst.com.my+OR+site:theedgemalaysia.com&hl=en-MY&gl=MY&ceid=MY:en"
