@@ -3,7 +3,7 @@ import requests
 from deep_translator import GoogleTranslator
 
 # Credentials
-TELEGRAM_BOT_TOKEN = "8900887284:AAEHQE1ufmrJc5zA_Lb3C_HpvokTLP59AHo"
+TELEGRAM_BOT_TOKEN = "8900887284:AAEQQDF3dDxnofgy76u6Km3efzMvOVZAT4I"
 TELEGRAM_CHAT_ID = "-1004348673663"
 
 # RSS Feed Source
