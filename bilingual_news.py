@@ -87,4 +87,4 @@ def fetch_and_post_news(minutes_window=40):
     return posted_count
 
 if __name__ == "__main__":
-    fetch_and_post_news(minutes_window=10080)
+    fetch_and_post_news(minutes_window=1440)
