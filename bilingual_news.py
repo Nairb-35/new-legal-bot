@@ -16,36 +16,34 @@ FEED_URL = "https://news.google.com/rss/search?q=(law+OR+court+OR+parliament+OR+
 
 def push_to_notion(title_en, title_bm, link, date_str):
     if not NOTION_TOKEN:
+        print("Error: NOTIONTOKEN environment variable is missing.")
         return None
+        
     url = "https://api.notion.com/v1/pages"
     headers = {
         "Authorization": f"Bearer {NOTION_TOKEN}",
         "Content-Type": "application/json",
         "Notion-Version": "2022-06-28"
     }
+    
     payload = {
         "parent": {"database_id": NOTION_DATABASE_ID},
         "properties": {
-            "Name": {"title": [{"text": {"content": title_en}}]},
-            "Source Link": {"url": link}
+            "Name": {"title": [{"text": {"content": title_en}}]}
         },
         "children": [
-            # HEADER
             {"object": "block", "type": "heading_1", "heading_1": {"rich_text": [{"type": "text", "text": {"content": f"📰 {title_en}"}}]}},
             {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"🇲🇾 {title_bm}"}}]}},
-            {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"📅 Publication Date: {date_str}"}}]}},
+            {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"📅 Date: {date_str}"}}]}},
+            {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"🔗 Article URL: {link}"}}]}},
             
-            # SECTION 1: VIDEO SCRIPT PROMPT (45–90s)
             {"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"type": "text", "text": {"content": "🎬 Short-Form Educational Video Script (45–90s)"}}]}},
             {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"🪝 Hook (0–5s): 'Did you know about this major legal update regarding {title_en}?'"}}]}},
-            {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"📰 News (5–25s): Breaking legal developments reported by Malaysian media on {date_str}."}}]}},
-            {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "⚖️ Why It Matters (25–50s): Legal significance, statutory impact, and constitutional context."}}]}},
+            {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"📰 News (5–25s): Breaking legal developments reported on {date_str}."}}]}},
+            {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "⚖️ Why It Matters (25–50s): Statutory impact, fundamental rights, and legal significance."}}]}},
             {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "🧠 Key Takeaway (50–70s): Essential insight for law students and the public."}}]}},
             {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "🎤 Closing (70–90s): 'Follow for more Malaysian legal updates and interview prep!'"}}]}},
-            {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"💬 Suggested Caption: Important legal update on {title_en}. Here is what it means for Malaysian law."}}]}},
-            {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "#️⃣ Hashtags: #MalaysianLaw #LawStudent #LawInterview #LegalNews #Malaysia"}}]}},
 
-            # SECTION 2: LENS+ LAW INTERVIEW ANALYSIS
             {"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"type": "text", "text": {"content": "⚖️ LENS+ Law School Interview Analysis"}}]}},
             {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "L — Legal Issue: Main constitutional, criminal, or statutory issue."}}]}},
             {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "E — Explanation & Context: Facts summary and legal background."}}]}},
@@ -53,7 +51,6 @@ def push_to_notion(title_en, title_bm, link, date_str):
             {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "S — Stakeholders & Significance: Impact on judiciary, public interest, and government."}}]}},
             {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "+ Personal Reasoned View: Balanced, mature legal opinion for an interview."}}]}},
             
-            # SECTION 3: INTERVIEW PREPARATION EXTRAS
             {"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"type": "text", "text": {"content": "🎯 Interview Answer & Follow-up Q&A"}}]}},
             {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"🎤 60-Second Spoken Answer: 'A key legal issue in Malaysia is {title_en}. This raises important constitutional and statutory questions regarding...'"}}]}},
             {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "❓ 3 Follow-up Q&As: 1) Statutory basis? 2) Balancing competing rights? 3) Reform recommendations?"}}]}},
@@ -63,10 +60,15 @@ def push_to_notion(title_en, title_bm, link, date_str):
     }
     try:
         res = requests.post(url, json=payload, headers=headers)
+        print("Notion API Status Code:", res.status_code)
         if res.status_code == 200:
-            return res.json().get("url")
+            notion_page_url = res.json().get("url")
+            print("Successfully created Notion page:", notion_page_url)
+            return notion_page_url
+        else:
+            print("Notion Error Response:", res.text)
     except Exception as e:
-        print("Notion error:", e)
+        print("Notion Exception:", e)
     return None
 
 def fetch_and_post_news(minutes_window=1440):
@@ -91,19 +93,17 @@ def fetch_and_post_news(minutes_window=1440):
         except Exception:
             title_bm = title_en
             
-        # Push to Notion and retrieve page URL
+        # Push to Notion
         notion_url = push_to_notion(title_en, title_bm, link, published_str)
         if not notion_url:
             notion_url = link
             
-        # Telegram Message Format
         message = (
             f"🇬🇧 <b>{title_en}</b>\n"
             f"🇲🇾 <i>{title_bm}</i>\n"
             f"📅 <b>Tarikh / Date:</b> {published_str}"
         )
         
-        # Interactive Buttons
         reply_markup = {
             "inline_keyboard": [
                 [
