@@ -1,19 +1,27 @@
+from datetime import datetime, timezone, timedelta
+import time
 import feedparser
 import requests
 from deep_translator import GoogleTranslator
 
-# Credentials
-TELEGRAM_BOT_TOKEN = "8900887284:AAEQQDF3dDxnofgy76u6Km3efzMvOVZAT4I"
+# Credentials (replace TELEGRAM_BOT_TOKEN with your active Bot Token)
+TELEGRAM_BOT_TOKEN = "8900887284:AAFkOSAqyneCnJBcgXuswASwfIQs1qzAVk4"
 TELEGRAM_CHAT_ID = "-1004348673663"
 
-# RSS Feed Source
 FEED_URL = "https://news.google.com/rss/search?q=(law+OR+court+OR+parliament+OR+judgment+OR+bill+OR+policy)+site:thestar.com.my+OR+site:bharian.com.my+OR+site:freemalaysiatoday.com+OR+site:malaysianbar.org.my+OR+site:jurist.org+OR+site:nst.com.my+OR+site:theedgemalaysia.com&hl=en-MY&gl=MY&ceid=MY:en"
 
 def fetch_and_post_bilingual_news():
     translator = GoogleTranslator(source='en', target='ms')
     feed = feedparser.parse(FEED_URL)
+    now = datetime.now(timezone.utc)
     
-    for entry in feed.entries[:3]:
+    for entry in feed.entries:
+        # Check publication time: skip articles older than 40 minutes
+        if hasattr(entry, 'published_parsed') and entry.published_parsed:
+            published_dt = datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
+            if now - published_dt > timedelta(minutes=40):
+                continue
+                
         title_en = entry.title
         link = entry.link
         
