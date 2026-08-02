@@ -2,6 +2,8 @@ import feedparser
 import requests
 import time
 import os
+import re
+import urllib.parse
 from datetime import datetime, timezone, timedelta
 from deep_translator import GoogleTranslator
 
@@ -10,9 +12,40 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAMBOTTOKEN")
 NOTION_TOKEN = os.getenv("NOTIONTOKEN")
 
 TELEGRAM_CHAT_ID = "-1004348673663"
-NOTION_DATABASE_ID = "3b0ffaadad14803f8aa7e473024f8cb7"  # Corrected 32-char ID
+NOTION_DATABASE_ID = "3b0ffaadad14803f8aa7e473024f8cb7"
 
-FEED_URL = "https://news.google.com/rss/search?q=(law+OR+court+OR+parliament+OR+judgment+OR+bill+OR+policy)+site:thestar.com.my+OR+site:bharian.com.my+OR+site:freemalaysiatoday.com+OR+site:malaysianbar.org.my+OR+site:jurist.org+OR+site:nst.com.my+OR+site:theedgemalaysia.com&hl=en-MY&gl=MY&ceid=MY:en"
+# REFINED LEGAL PHRASES & EXCLUSIONS (Prevents sports/food court false positives)
+QUERY_PHRASES = (
+    '("Federal Court" OR "Court of Appeal" OR "High Court" OR "judicial review" OR '
+    '"Attorney General" OR "Parliament" OR "Dewan Rakyat" OR "Dewan Negara" OR '
+    '"Constitution" OR "legislation" OR "prosecution" OR "judge" OR "legal" OR "lawyer") '
+    '-sports -tennis -basketball -badminton -food -entertainment'
+)
+SITES = (
+    'site:thestar.com.my OR site:bharian.com.my OR site:freemalaysiatoday.com OR '
+    'site:malaysianbar.org.my OR site:jurist.org OR site:nst.com.my OR site:theedgemalaysia.com'
+)
+
+FEED_URL = f"https://news.google.com/rss/search?q={urllib.parse.quote(QUERY_PHRASES + ' ' + SITES)}&hl=en-MY&gl=MY&ceid=MY:en"
+
+NON_LEGAL_TERMS = [
+    r'\btennis\b', r'\bbasketball\b', r'\bbadminton\b', r'\bfood court\b',
+    r'\bsports\b', r'\bmatch\b', r'\bchampion\b', r'\btournament\b', r'\bconcert\b'
+]
+
+def is_genuinely_legal(title, summary):
+    text = f"{title} {summary}".lower()
+    
+    # Reject sports & non-legal false positives
+    if any(re.search(term, text) for term in NON_LEGAL_TERMS):
+        return False
+        
+    legal_keywords = [
+        r'court', r'law', r'parliament', r'judge', r'bill', r'policy',
+        r'attorney general', r'constitution', r'legal', r'prosecutor', r'verdict',
+        r'statute', r'judicial', r'amendment', r'bar council', r'tribunal'
+    ]
+    return any(re.search(kw, text) for kw in legal_keywords)
 
 def push_to_notion(title_en, title_bm, link, date_str):
     if not NOTION_TOKEN:
@@ -37,13 +70,17 @@ def push_to_notion(title_en, title_bm, link, date_str):
             {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"📅 Date: {date_str}"}}]}},
             {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"🔗 Article URL: {link}"}}]}},
             
+            # VIDEO SCRIPT PROMPT (45–90s)
             {"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"type": "text", "text": {"content": "🎬 Short-Form Educational Video Script (45–90s)"}}]}},
             {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"🪝 Hook (0–5s): 'Did you know about this major legal update regarding {title_en}?'"}}]}},
             {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"📰 News (5–25s): Breaking legal developments reported on {date_str}."}}]}},
             {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "⚖️ Why It Matters (25–50s): Statutory impact, fundamental rights, and legal significance."}}]}},
             {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "🧠 Key Takeaway (50–70s): Essential insight for law students and the public."}}]}},
             {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "🎤 Closing (70–90s): 'Follow for more Malaysian legal updates and interview prep!'"}}]}},
+            {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": f"💬 Suggested Caption: Important legal update on {title_en}. Here is what it means for Malaysian law."}}]}},
+            {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "#️⃣ Hashtags: #MalaysianLaw #LawStudent #LawInterview #LegalNews #Malaysia"}}]}},
 
+            # LENS+ LAW SCHOOL INTERVIEW ANALYSIS
             {"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"type": "text", "text": {"content": "⚖️ LENS+ Law School Interview Analysis"}}]}},
             {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "L — Legal Issue: Main constitutional, criminal, or statutory issue."}}]}},
             {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "E — Explanation & Context: Facts summary and legal background."}}]}},
@@ -78,6 +115,14 @@ def fetch_and_post_news(minutes_window=1440):
     posted_count = 0
     
     for entry in feed.entries:
+        title_en = entry.title
+        summary = getattr(entry, 'summary', '')
+        
+        # CLASSIFIER GUARDRAIL: Filter out non-legal articles
+        if not is_genuinely_legal(title_en, summary):
+            print(f"Skipping non-legal article: {title_en}")
+            continue
+            
         published_str = "Today"
         if hasattr(entry, 'published_parsed') and entry.published_parsed:
             published_dt = datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
@@ -85,7 +130,6 @@ def fetch_and_post_news(minutes_window=1440):
                 continue
             published_str = published_dt.strftime("%d %B %Y")
                 
-        title_en = entry.title
         link = entry.link
         
         try:
