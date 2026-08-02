@@ -17,4 +17,7 @@ jobs:
       - name: Install dependencies
         run: pip install feedparser requests deep-translator
       - name: Run script
+        env:
+          TELEGRAMBOTTOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
+          NOTIONTOKEN: ${{ secrets.NOTIONTOKEN }}
         run: python bilingual_news.py
