@@ -10,7 +10,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAMBOTTOKEN")
 NOTION_TOKEN = os.getenv("NOTIONTOKEN")
 
 TELEGRAM_CHAT_ID = "-1004348673663"
-NOTION_DATABASE_ID = "3b0ffaadad14803f8aa7e4730248cb7"
+NOTION_DATABASE_ID = "3b0ffaadad14803f8aa7e473024f8cb7"  # Corrected 32-char ID
 
 FEED_URL = "https://news.google.com/rss/search?q=(law+OR+court+OR+parliament+OR+judgment+OR+bill+OR+policy)+site:thestar.com.my+OR+site:bharian.com.my+OR+site:freemalaysiatoday.com+OR+site:malaysianbar.org.my+OR+site:jurist.org+OR+site:nst.com.my+OR+site:theedgemalaysia.com&hl=en-MY&gl=MY&ceid=MY:en"
 
