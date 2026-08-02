@@ -5,9 +5,9 @@ import os
 from datetime import datetime, timezone, timedelta
 from deep_translator import GoogleTranslator
 
-# Read tokens securely from GitHub Secrets
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+# Matches your exact GitHub Secret names:
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAMBOTTOKEN")
+NOTION_TOKEN = os.getenv("NOTIONTOKEN")
 
 TELEGRAM_CHAT_ID = "-1004348673663"
 NOTION_DATABASE_ID = "3b0ffaadad148049a9d1f440572137c8"
