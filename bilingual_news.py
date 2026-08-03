@@ -13,12 +13,12 @@ NOTION_TOKEN = os.getenv("NOTIONTOKEN")
 TELEGRAM_CHAT_ID = "-1004348673663"
 NOTION_DATABASE_ID = "3b0ffaadad14803f8aa7e4730248cb7"
 
-# Clean, valid Google News RSS Feed URL for Malaysian legal news
 FEED_URL = "https://news.google.com/rss/search?q=(Malaysia+OR+Malaysian)+(law+OR+court+OR+parliament+OR+judgment+OR+bill+OR+police+OR+investigation+OR+charge+OR+policy)+site:thestar.com.my+OR+site:freemalaysiatoday.com+OR+site:bharian.com.my+OR+site:nst.com.my+OR+site:theedgemalaysia.com&hl=en-MY&gl=MY&ceid=MY:en"
 
 NON_LEGAL_TERMS = [
     r'\btennis\b', r'\bbasketball\b', r'\bbadminton\b', r'\bfood court\b',
-    r'\bsports\b', r'\bmatch\b', r'\bchampion\b', r'\btournament\b', r'\bconcert\b'
+    r'\bsports\b', r'\bmatch\b', r'\bchampion\b', r'\btournament\b', r'\bconcert\b',
+    r'0\+ articles', r'articles\)'  # Filters out empty category pages
 ]
 
 def is_genuinely_legal(title, summary):
@@ -108,17 +108,20 @@ def fetch_and_post_news(minutes_window=1440):
     
     print(f"Total entries fetched from Google News RSS: {len(feed.entries)}")
     
-    for entry in feed.entries[:3]:
+    for entry in feed.entries:
         title_en = entry.title
         summary = getattr(entry, 'summary', '')
         
+        # CLASSIFIER GUARDRAIL: Skip category pages & non-legal articles
         if not is_genuinely_legal(title_en, summary):
-            print(f"Skipping non-legal article: {title_en}")
+            print(f"Skipping non-legal or category page: {title_en}")
             continue
             
         published_str = "Today"
         if hasattr(entry, 'published_parsed') and entry.published_parsed:
             published_dt = datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
+            if now - published_dt > timedelta(minutes=minutes_window):
+                continue
             published_str = published_dt.strftime("%d %B %Y")
                 
         link = entry.link
