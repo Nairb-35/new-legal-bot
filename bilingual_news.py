@@ -12,7 +12,7 @@ NOTION_TOKEN = os.getenv("NOTIONTOKEN")
 
 TELEGRAM_CHAT_ID = "-1004348673663"
 NOTION_DATABASE_ID = "3b0ffaadad14803f8aa7e4730248cb7"
-NOTION_DATABASE_URL = f"https://www.notion.so/{NOTION_DATABASE_ID}"
+NOTION_DATABASE_URL = f"https://www.notion.so/p/{NOTION_DATABASE_ID}"
 
 # INCLUDES POLITICS, CABINET, MINISTERS & LEGAL NEWS
 FEED_URL = "https://news.google.com/rss/search?q=(Malaysia+OR+Malaysian)+(law+OR+court+OR+parliament+OR+judgment+OR+bill+OR+police+OR+investigation+OR+charge+OR+policy+OR+politics+OR+minister+OR+cabinet+OR+election)+site:thestar.com.my+OR+site:freemalaysiatoday.com+OR+site:bharian.com.my+OR+site:nst.com.my+OR+site:theedgemalaysia.com+OR+site:sinarharian.com.my&hl=en-MY&gl=MY&ceid=MY:en"
