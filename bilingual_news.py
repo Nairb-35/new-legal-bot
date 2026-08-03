@@ -3,7 +3,6 @@ import requests
 import time
 import os
 import re
-import urllib.parse
 from datetime import datetime, timezone, timedelta
 from deep_translator import GoogleTranslator
 
@@ -14,21 +13,24 @@ NOTION_TOKEN = os.getenv("NOTIONTOKEN")
 TELEGRAM_CHAT_ID = "-1004348673663"
 NOTION_DATABASE_ID = "3b0ffaadad14803f8aa7e4730248cb7"
 
-# STRICT MALAYSIAN LEGAL QUERY & SOURCES
-QUERY_PHRASES = (
-    '(Malaysia OR Malaysian) AND '
-    '("Federal Court" OR "Court of Appeal" OR "High Court" OR "judicial review" OR '
-    '"Attorney General" OR "Parliament" OR "Dewan Rakyat" OR "Dewan Negara" OR '
-    '"Constitution" OR "legislation" OR "prosecution" OR "police" OR "investigation" OR '
-    '"charge" OR "suspect" OR "judge" OR "legal" OR "lawyer" OR "court") '
-    '-sports -tennis -basketball -badminton -food -entertainment'
-)
-SITES = (
-    'site:thestar.com.my OR site:bharian.com.my OR site:freemalaysiatoday.com OR '
-    'site:malaysianbar.org.my OR site:nst.com.my OR site:theedgemalaysia.com OR site:sinarharian.com.my'
-)
+# Clean, valid Google News RSS Feed URL for Malaysian legal news
+FEED_URL = "https://news.google.com/rss/search?q=(Malaysia+OR+Malaysian)+(law+OR+court+OR+parliament+OR+judgment+OR+bill+OR+police+OR+investigation+OR+charge+OR+policy)+site:thestar.com.my+OR+site:freemalaysiatoday.com+OR+site:bharian.com.my+OR+site:nst.com.my+OR+site:theedgemalaysia.com&hl=en-MY&gl=MY&ceid=MY:en"
 
-FEED_URL = f"https://news.google.com/rss/search?q={urllib.parse.quote(QUERY_PHRASES + ' ' + SITES)}&hl=en-MY&gl=MY&ceid=MY:en"
+NON_LEGAL_TERMS = [
+    r'\btennis\b', r'\bbasketball\b', r'\bbadminton\b', r'\bfood court\b',
+    r'\bsports\b', r'\bmatch\b', r'\bchampion\b', r'\btournament\b', r'\bconcert\b'
+]
+
+def is_genuinely_legal(title, summary):
+    text = f"{title} {summary}".lower()
+    if any(re.search(term, text) for term in NON_LEGAL_TERMS):
+        return False
+    legal_keywords = [
+        r'court', r'law', r'parliament', r'judge', r'bill', r'policy',
+        r'attorney general', r'constitution', r'legal', r'prosecutor', r'verdict',
+        r'statute', r'judicial', r'amendment', r'bar council', r'tribunal', r'police', r'investigation'
+    ]
+    return any(re.search(kw, text) for kw in legal_keywords)
 
 def get_importance_rating(title, summary):
     text = f"{title} {summary}".lower()
@@ -87,8 +89,13 @@ def push_to_notion(title_en, title_bm, link, date_str, importance_stars):
     }
     try:
         res = requests.post(url, json=payload, headers=headers)
+        print("Notion API Status Code:", res.status_code)
         if res.status_code == 200:
-            return res.json().get("url")
+            notion_page_url = res.json().get("url")
+            print("Successfully created Notion page:", notion_page_url)
+            return notion_page_url
+        else:
+            print("Notion Error Response:", res.text)
     except Exception as e:
         print("Notion Exception:", e)
     return None
@@ -99,19 +106,22 @@ def fetch_and_post_news(minutes_window=1440):
     now = datetime.now(timezone.utc)
     posted_count = 0
     
-    for entry in feed.entries:
+    print(f"Total entries fetched from Google News RSS: {len(feed.entries)}")
+    
+    for entry in feed.entries[:3]:
+        title_en = entry.title
+        summary = getattr(entry, 'summary', '')
+        
+        if not is_genuinely_legal(title_en, summary):
+            print(f"Skipping non-legal article: {title_en}")
+            continue
+            
         published_str = "Today"
         if hasattr(entry, 'published_parsed') and entry.published_parsed:
             published_dt = datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
-            if now - published_dt > timedelta(minutes=minutes_window):
-                continue
             published_str = published_dt.strftime("%d %B %Y")
                 
-        title_en = entry.title
-        summary = getattr(entry, 'summary', '')
         link = entry.link
-        
-        # Calculate Importance Rating Stars
         importance_stars = get_importance_rating(title_en, summary)
         
         try:
@@ -119,7 +129,6 @@ def fetch_and_post_news(minutes_window=1440):
         except Exception:
             title_bm = title_en
             
-        # Push to Notion
         notion_url = push_to_notion(title_en, title_bm, link, published_str, importance_stars)
         if not notion_url:
             notion_url = link
@@ -150,7 +159,8 @@ def fetch_and_post_news(minutes_window=1440):
             "parse_mode": "HTML",
             "reply_markup": reply_markup
         }
-        requests.post(url, json=payload)
+        res_tg = requests.post(url, json=payload)
+        print("Telegram Send Status:", res_tg.status_code, res_tg.text)
         posted_count += 1
         
     return posted_count
