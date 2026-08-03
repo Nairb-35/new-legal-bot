@@ -88,7 +88,8 @@ def push_to_notion(title_en, title_bm, link, date_str, importance_stars):
     payload = {
         "parent": {"database_id": NOTION_DATABASE_ID},
         "properties": {
-            "Name": {"title": [{"text": {"content": title_en[:200]}}]}
+            "Name": {"title": [{"text": {"content": title_en[:200]}}]},
+            "Source Link": {"url": link}
         },
         "children": children_blocks
     }
