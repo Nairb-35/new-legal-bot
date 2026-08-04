@@ -171,7 +171,15 @@ def ai_lens(title, summary):
                 "further_reading (object with case, act, judgment, topic — one each), "
                 "memory_check (array of 3 short quiz questions, no answers), "
                 "hidden_question (string, the deeper question this story forces society to answer), "
-                "video (object with hook, news, why, takeaway, closing — each 1 sentence)."
+                "video (object for a 55–60s vertical short — keys: "
+                "hooks (array of 2 scroll-stopping opening lines, each <= 10 words, one bold/provocative and one curiosity-gap), "
+                "script (string, WORD-FOR-WORD spoken narration of ~130–150 words that reads naturally out loud in a punchy creator voice, "
+                "opens with the strongest hook, explains the story and why it legally matters, and ends with a call to follow — no stage directions inside it), "
+                "beats (array of 4–5 objects each with 'say' (the spoken line for this beat), 'caption' (short on-screen text overlay, <= 6 words) and 'visual' (a simple b-roll / shot suggestion)), "
+                "takeaway (string, one memorable line usable as the pinned comment), "
+                "post_caption (string, ready-to-paste caption for the post), "
+                "hashtags (array of 5–7 short hashtag strings without spaces), "
+                "title (string, a catchy <= 60 char video title))."
             ),
             "messages": [{"role": "user", "content": f"Headline: {title}\nSnippet: {summary or '(no snippet available)'}"}],
         }
@@ -311,13 +319,39 @@ def build_blocks(title_en, title_bm, link, date_str, importance_stars, a):
         _q(a.get("hidden_question", "")),
         _divider(),
 
-        _h2("🎬 Short-Form Educational Video Script (45–90s)"),
-        _b(f"🪝 Hook (0–5s): {v.get('hook', '')}"),
-        _b(f"📰 News (5–25s): {v.get('news', '')}"),
-        _b(f"⚖️ Why It Matters (25–50s): {v.get('why', '')}"),
-        _b(f"🧠 Key Takeaway (50–70s): {v.get('takeaway', '')}"),
-        _b(f"🎤 Closing (70–90s): {v.get('closing', '')}"),
+        _h2("🎬 Short-Form Video (record & post ready · ~55–60s)"),
     ]
+
+    hooks = v.get("hooks")
+    if not hooks and v.get("hook"):  # backward-compat if AI returns old shape
+        hooks = [v.get("hook")]
+    if hooks:
+        blocks.append(_b("🪝 Hook options (test both):"))
+        for h in hooks[:2]:
+            blocks.append(_b(f"    • {h}"))
+
+    if v.get("title"):
+        blocks.append(_b(f"🏷 Title: {v.get('title')}"))
+
+    blocks.append(_h2("🎤 Word-for-Word Script"))
+    blocks.append(_p(v.get("script", "")))
+
+    beats = v.get("beats") or []
+    if beats:
+        blocks.append(_h2("🎬 Shot List (say / caption / visual)"))
+        for i, bt in enumerate(beats[:5]):
+            blocks.append(_b(f"{i + 1}. 🗣 {bt.get('say', '')}"))
+            blocks.append(_b(f"    💬 {bt.get('caption', '')}   |   🎥 {bt.get('visual', '')}"))
+
+    if v.get("takeaway"):
+        blocks.append(_b(f"📌 Pinned-comment takeaway: {v.get('takeaway')}"))
+
+    blocks.append(_h2("📱 Post Kit"))
+    blocks.append(_p(f"Caption: {v.get('post_caption', '')}"))
+    tags = " ".join(v.get("hashtags") or [])
+    if tags:
+        blocks.append(_p(f"Hashtags: {tags}"))
+
     return blocks
 
 
