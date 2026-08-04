@@ -135,24 +135,43 @@ def already_in_notion(title, link):
 #    retries without the date) but date-search will return nothing.
 # ---------------------------------------------------------------------------
 def ai_lens(title, summary):
-    """Ask the LawGPT AI for a SPECIFIC LENS analysis + video script for this
-    article. Returns a dict, or None on failure (then we fall back to a template)."""
+    """Ask the LawGPT AI for a SPECIFIC LIF (Legal Insight Framework) analysis +
+    video script for this article. Returns a dict, or None on failure (then we
+    fall back to a template)."""
     try:
         body = {
             "model": "claude-sonnet-4-6",
-            "max_tokens": 1800,
+            "max_tokens": 4000,
             "system": (
-                "You are a Malaysian law lecturer coaching a law-school interview candidate. "
-                "Analyse ONE news item using its headline and short snippet. Be SPECIFIC and substantive "
-                "— never generic filler. Ground everything in the real Malaysian legal framework and name the "
-                "actual statutes or constitutional Articles that genuinely apply (e.g. Federal Constitution Art 5/8/10, "
-                "Penal Code, Control of Supplies Act 1961, Criminal Procedure Code, etc.). Do NOT invent case citations. "
+                "You are a Malaysian law lecturer and interview coach. You do NOT just summarise news — you turn one "
+                "news item into legal understanding, critical thinking, interview prep and long-term memory, using the "
+                "Legal Insight Framework (LIF). Work only from the headline and short snippet. Be SPECIFIC and substantive "
+                "— never generic filler, never restate the headline. Ground everything in the real Malaysian legal framework "
+                "and name the ACTUAL statutes or constitutional Articles that genuinely apply (e.g. Federal Constitution "
+                "Art 5/8/10, Penal Code, Control of Supplies Act 1961, Criminal Procedure Code, Companies Act 2016, PDPA 2010, "
+                "Sedition Act 1948, etc.). Do NOT invent case citations or fake section numbers — if unsure, describe the "
+                "principle instead of citing. Ratings are integers 1–5.\n"
                 "Output ONLY valid JSON (no markdown fences) with EXACTLY these keys: "
-                "legal_issue (string), context (string), questions (array of 3 strings), stakeholders (string), "
-                "view (string), answer_60s (string, ~90 spoken words, specific to THIS story), "
-                "followups (array of 3 objects each with 'q' and 'a'), "
-                "terms (array of 5 objects each with 'term' and 'meaning' relevant to this story), "
-                "tips (string), video (object with hook, news, why, takeaway, closing — each 1 sentence)."
+                "jurisdiction (string, e.g. 'Malaysia'), "
+                "areas (array of 2–4 short strings, e.g. 'Constitutional', 'Criminal'), "
+                "ratings (object with integer keys legal_impact, interview_value, exam_relevance, public_importance, longterm — each 1–5), "
+                "executive_brief (string, max 3 sentences, what happened), "
+                "why_lawyers_care (string, why it is LEGALLY significant, not political), "
+                "core_principle (string, name and explain the underlying legal principle/doctrine), "
+                "conflict (object with side_a, side_b, explanation — the two competing legal interests), "
+                "reasoning (array of 5 strings walking Facts -> Relevant principles -> Competing arguments -> Likely outcome -> Remaining uncertainty), "
+                "real_world_impact (array of 3–5 strings naming who actually feels this), "
+                "what_next (array of 2–4 strings, likely next legal steps e.g. appeal, judicial review, royal assent), "
+                "misunderstood (object with myth and reality — a common misconception vs the legal reality), "
+                "interview (object with why_topic (string, why an interviewer would pick this), opening_sentence (string, one strong opener), "
+                "insight (string, one non-obvious observation), followups (array of 3–5 strings, likely follow-up questions)), "
+                "think_deeper (string, ONE analytical open question), "
+                "connections (array of 2–4 strings linking to a famous case, another area of law, another country or a historical event), "
+                "remember (array of exactly 3 short strings — the principle, why it matters, the biggest unresolved issue), "
+                "further_reading (object with case, act, judgment, topic — one each), "
+                "memory_check (array of 3 short quiz questions, no answers), "
+                "hidden_question (string, the deeper question this story forces society to answer), "
+                "video (object with hook, news, why, takeaway, closing — each 1 sentence)."
             ),
             "messages": [{"role": "user", "content": f"Headline: {title}\nSnippet: {summary or '(no snippet available)'}"}],
         }
@@ -181,43 +200,124 @@ def _h1(t): return {"object": "block", "type": "heading_1", "heading_1": _rt(t)}
 def _h2(t): return {"object": "block", "type": "heading_2", "heading_2": _rt(t)}
 def _p(t): return {"object": "block", "type": "paragraph", "paragraph": _rt(t)}
 def _b(t): return {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": _rt(t)}
+def _q(t): return {"object": "block", "type": "quote", "quote": _rt(t)}
+def _divider(): return {"object": "block", "type": "divider", "divider": {}}
+
+
+def _stars(n):
+    """Turn an int 1–5 into a ⭐ / ☆ bar (defensive against bad AI output)."""
+    try:
+        n = max(0, min(5, int(n)))
+    except Exception:
+        n = 0
+    return "⭐" * n + "☆" * (5 - n)
 
 
 def build_blocks(title_en, title_bm, link, date_str, importance_stars, a):
-    """Real, article-specific blocks from the AI analysis `a`."""
+    """Real, article-specific blocks from the AI analysis `a`, laid out using the
+    Legal Insight Framework (LIF v1)."""
     v = a.get("video", {}) or {}
+    r = a.get("ratings", {}) or {}
+    conflict = a.get("conflict", {}) or {}
+    mis = a.get("misunderstood", {}) or {}
+    interview = a.get("interview", {}) or {}
+    fr = a.get("further_reading", {}) or {}
+    areas = ", ".join(a.get("areas") or []) or "—"
+
     blocks = [
         _h1(f"📰 {title_en[:190]}"),
         _p(f"🇲🇾 {title_bm[:190]}"),
-        _p(f"📅 Date: {date_str} | Importance: {importance_stars}"),
+        _p(f"📅 Date: {date_str}   |   🌍 Jurisdiction: {a.get('jurisdiction', 'Malaysia')}"),
+        _p(f"📚 Area(s) of law: {areas}"),
         _p(f"🔗 Article URL: {link}"),
+        _divider(),
+
+        _h2("⭐ Ratings"),
+        _b(f"⚖️ Legal Impact:      {_stars(r.get('legal_impact'))}"),
+        _b(f"🎓 Interview Value:   {_stars(r.get('interview_value'))}"),
+        _b(f"📝 Exam Relevance:    {_stars(r.get('exam_relevance'))}"),
+        _b(f"🌍 Public Importance: {_stars(r.get('public_importance'))}"),
+        _b(f"🔮 Long-term Signif.: {_stars(r.get('longterm'))}"),
+        _divider(),
+
+        _h2("⚡ Executive Brief — What happened"),
+        _p(a.get("executive_brief", "")),
+
+        _h2("⚖️ Why Lawyers Care"),
+        _p(a.get("why_lawyers_care", "")),
+
+        _h2("🧠 The Core Legal Principle"),
+        _p(a.get("core_principle", "")),
+
+        _h2("⚔️ The Real Legal Conflict"),
+        _b(f"🅰️ {conflict.get('side_a', '')}"),
+        _b(f"🆚 vs {conflict.get('side_b', '')}"),
+        _p(conflict.get("explanation", "")),
+
+        _h2("🏛 Legal Reasoning (how a lawyer thinks it through)"),
+    ]
+    for step in (a.get("reasoning") or [])[:5]:
+        blocks.append(_b(step))
+
+    blocks.append(_h2("🌍 Real-World Impact"))
+    for imp in (a.get("real_world_impact") or [])[:5]:
+        blocks.append(_b(imp))
+
+    blocks.append(_h2("🔮 What Happens Next"))
+    for nx in (a.get("what_next") or [])[:4]:
+        blocks.append(_b(nx))
+
+    blocks += [
+        _h2("❌ What Most People Get Wrong"),
+        _b(f"Myth: {mis.get('myth', '')}"),
+        _b(f"Reality: {mis.get('reality', '')}"),
+
+        _h2("🎓 Interview Corner"),
+        _b(f"Why interviewers like this topic: {interview.get('why_topic', '')}"),
+        _b(f"Best opening sentence: {interview.get('opening_sentence', '')}"),
+        _b(f"One impressive insight: {interview.get('insight', '')}"),
+        _b("Possible follow-up questions:"),
+    ]
+    for fu in (interview.get("followups") or [])[:5]:
+        blocks.append(_b(f"    • {fu}"))
+
+    blocks += [
+        _h2("💭 Think Like a Lawyer"),
+        _q(a.get("think_deeper", "")),
+
+        _h2("🔗 Connections"),
+    ]
+    for c in (a.get("connections") or [])[:4]:
+        blocks.append(_b(c))
+
+    blocks.append(_h2("📖 Remember This"))
+    for rem in (a.get("remember") or [])[:3]:
+        blocks.append(_b(f"✔ {rem}"))
+
+    blocks += [
+        _h2("🚀 Further Reading"),
+        _b(f"📕 Case: {fr.get('case', '')}"),
+        _b(f"📜 Act: {fr.get('act', '')}"),
+        _b(f"⚖️ Judgment: {fr.get('judgment', '')}"),
+        _b(f"🎓 Topic: {fr.get('topic', '')}"),
+
+        _h2("🧠 Memory Check (test yourself)"),
+    ]
+    for i, mc in enumerate((a.get("memory_check") or [])[:3]):
+        blocks.append(_b(f"{i + 1}. {mc}"))
+
+    blocks += [
+        _h2("🧩 The Hidden Question"),
+        _q(a.get("hidden_question", "")),
+        _divider(),
+
         _h2("🎬 Short-Form Educational Video Script (45–90s)"),
         _b(f"🪝 Hook (0–5s): {v.get('hook', '')}"),
         _b(f"📰 News (5–25s): {v.get('news', '')}"),
         _b(f"⚖️ Why It Matters (25–50s): {v.get('why', '')}"),
         _b(f"🧠 Key Takeaway (50–70s): {v.get('takeaway', '')}"),
         _b(f"🎤 Closing (70–90s): {v.get('closing', '')}"),
-        _h2("⚖️ LENS+ Law School Interview Analysis"),
-        _b(f"L — Legal Issue: {a.get('legal_issue', '')}"),
-        _b(f"E — Explanation & Context: {a.get('context', '')}"),
-        _b("N — Necessary Legal Questions:"),
     ]
-    for q in (a.get("questions") or [])[:3]:
-        blocks.append(_b(f"    • {q}"))
-    blocks += [
-        _b(f"S — Stakeholders & Significance: {a.get('stakeholders', '')}"),
-        _b(f"+ Personal Reasoned View: {a.get('view', '')}"),
-        _h2("🎯 Interview Answer & Follow-up Q&A"),
-        _p(f"🎤 60-Second Spoken Answer: {a.get('answer_60s', '')}"),
-        _b("❓ Follow-up Q&As:"),
-    ]
-    for i, fu in enumerate((a.get("followups") or [])[:3]):
-        blocks.append(_b(f"    {i + 1}) Q: {fu.get('q', '')}"))
-        blocks.append(_b(f"        A: {fu.get('a', '')}"))
-    blocks.append(_b("📚 5 Key Legal Terms:"))
-    for tm in (a.get("terms") or [])[:5]:
-        blocks.append(_b(f"    • {tm.get('term', '')}: {tm.get('meaning', '')}"))
-    blocks.append(_b(f"🎯 Interview Tips: {a.get('tips', '')}"))
     return blocks
 
 
