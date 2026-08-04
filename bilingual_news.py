@@ -11,7 +11,10 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAMBOTTOKEN")
 NOTION_TOKEN = os.getenv("NOTIONTOKEN")
 
 TELEGRAM_CHAT_ID = "-1004348673663"
-NOTION_DATABASE_ID = "3b0ffaadad14803f8aa7e4730248cb7"
+# Correct 32-char database id (the old one was missing a character, so every
+# Notion save 404'd — which caused BOTH the repeated news and the broken
+# "page couldn't be found" LENS/Video buttons).
+NOTION_DATABASE_ID = "3b0ffaadad14803f8aa7e473024f8cb7"
 NOTION_DATABASE_URL = f"https://www.notion.so/{NOTION_DATABASE_ID}"
 
 # Clean Google News RSS feed for Malaysian legal & political news.
@@ -125,9 +128,12 @@ def already_in_notion(title, link):
 #    retries without the date) but date-search will return nothing.
 # ---------------------------------------------------------------------------
 def push_to_notion(title_en, title_bm, link, date_str, date_iso, importance_stars):
+    # Returns the created page URL on success, or None on failure (so the caller
+    # can skip Telegram and retry next run — never posting a duplicate or a
+    # broken link).
     if not NOTION_TOKEN:
         print("Error: NOTIONTOKEN environment variable is missing.")
-        return NOTION_DATABASE_URL
+        return None
 
     url = "https://api.notion.com/v1/pages"
     children_blocks = [
@@ -180,7 +186,7 @@ def push_to_notion(title_en, title_bm, link, date_str, date_iso, importance_star
         print("Notion Error Response:", res.status_code, res.text[:400])
     except Exception as e:
         print("Notion Exception:", e)
-    return NOTION_DATABASE_URL
+    return None
 
 
 def send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link):
@@ -248,7 +254,6 @@ def fetch_and_post_news(minutes_window=1440):
         if already_in_notion(title_en, link):
             seen_this_run.add(key)
             continue
-        seen_this_run.add(key)
 
         importance_stars = get_importance_rating(title_en, summary)
         try:
@@ -256,7 +261,15 @@ def fetch_and_post_news(minutes_window=1440):
         except Exception:
             title_bm = title_en
 
-        notion_url = push_to_notion(title_en, title_bm, link, published_str, date_iso, importance_stars) or NOTION_DATABASE_URL
+        # Save to Notion FIRST. Only if that succeeds do we send to Telegram and
+        # mark it seen — so a Notion failure can never produce a duplicate post or
+        # a broken button link; it simply retries on the next run.
+        notion_url = push_to_notion(title_en, title_bm, link, published_str, date_iso, importance_stars)
+        if not notion_url:
+            print(f"Notion save failed — not posting (will retry next run): {title_en}")
+            continue
+
+        seen_this_run.add(key)
         send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link)
         posted_count += 1
         time.sleep(1)  # be gentle with Telegram rate limits
