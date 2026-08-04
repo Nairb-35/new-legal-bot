@@ -3,8 +3,15 @@ import requests
 import time
 import os
 import re
+import json
 from datetime import datetime, timezone, timedelta
 from deep_translator import GoogleTranslator
+
+# The bot borrows your existing LawGPT AI (Gemini via its proxy) to write a REAL,
+# article-specific LENS analysis + video script — no separate API key needed.
+# The proxy accepts requests from its own origins, so we send that Origin header.
+AI_ENDPOINT = "https://lawgpt-app.vercel.app/api/claude"
+AI_ORIGIN = "https://lawgpt-app.vercel.app"
 
 # Matches GitHub Secret names:
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAMBOTTOKEN")
@@ -127,7 +134,94 @@ def already_in_notion(title, link):
 #    'Legal News & Interview Prep'. If it's missing, posting still works (it
 #    retries without the date) but date-search will return nothing.
 # ---------------------------------------------------------------------------
-def push_to_notion(title_en, title_bm, link, date_str, date_iso, importance_stars):
+def ai_lens(title, summary):
+    """Ask the LawGPT AI for a SPECIFIC LENS analysis + video script for this
+    article. Returns a dict, or None on failure (then we fall back to a template)."""
+    try:
+        body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 1800,
+            "system": (
+                "You are a Malaysian law lecturer coaching a law-school interview candidate. "
+                "Analyse ONE news item using its headline and short snippet. Be SPECIFIC and substantive "
+                "— never generic filler. Ground everything in the real Malaysian legal framework and name the "
+                "actual statutes or constitutional Articles that genuinely apply (e.g. Federal Constitution Art 5/8/10, "
+                "Penal Code, Control of Supplies Act 1961, Criminal Procedure Code, etc.). Do NOT invent case citations. "
+                "Output ONLY valid JSON (no markdown fences) with EXACTLY these keys: "
+                "legal_issue (string), context (string), questions (array of 3 strings), stakeholders (string), "
+                "view (string), answer_60s (string, ~90 spoken words, specific to THIS story), "
+                "followups (array of 3 objects each with 'q' and 'a'), "
+                "terms (array of 5 objects each with 'term' and 'meaning' relevant to this story), "
+                "tips (string), video (object with hook, news, why, takeaway, closing — each 1 sentence)."
+            ),
+            "messages": [{"role": "user", "content": f"Headline: {title}\nSnippet: {summary or '(no snippet available)'}"}],
+        }
+        res = requests.post(AI_ENDPOINT, json=body,
+                            headers={"Content-Type": "application/json", "Origin": AI_ORIGIN},
+                            timeout=60)
+        if res.status_code != 200:
+            print("AI analysis error:", res.status_code, res.text[:200])
+            return None
+        text = "".join(b.get("text", "") for b in res.json().get("content", []) if b.get("type") == "text").strip()
+        a, b = text.find("{"), text.rfind("}")
+        if a < 0 or b <= a:
+            return None
+        return json.loads(text[a:b + 1])
+    except Exception as ex:
+        print("AI analysis exception:", ex)
+        return None
+
+
+# ---- tiny Notion block builders ----
+def _rt(t):
+    return {"rich_text": [{"type": "text", "text": {"content": str(t)[:1900]}}]}
+
+
+def _h1(t): return {"object": "block", "type": "heading_1", "heading_1": _rt(t)}
+def _h2(t): return {"object": "block", "type": "heading_2", "heading_2": _rt(t)}
+def _p(t): return {"object": "block", "type": "paragraph", "paragraph": _rt(t)}
+def _b(t): return {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": _rt(t)}
+
+
+def build_blocks(title_en, title_bm, link, date_str, importance_stars, a):
+    """Real, article-specific blocks from the AI analysis `a`."""
+    v = a.get("video", {}) or {}
+    blocks = [
+        _h1(f"📰 {title_en[:190]}"),
+        _p(f"🇲🇾 {title_bm[:190]}"),
+        _p(f"📅 Date: {date_str} | Importance: {importance_stars}"),
+        _p(f"🔗 Article URL: {link}"),
+        _h2("🎬 Short-Form Educational Video Script (45–90s)"),
+        _b(f"🪝 Hook (0–5s): {v.get('hook', '')}"),
+        _b(f"📰 News (5–25s): {v.get('news', '')}"),
+        _b(f"⚖️ Why It Matters (25–50s): {v.get('why', '')}"),
+        _b(f"🧠 Key Takeaway (50–70s): {v.get('takeaway', '')}"),
+        _b(f"🎤 Closing (70–90s): {v.get('closing', '')}"),
+        _h2("⚖️ LENS+ Law School Interview Analysis"),
+        _b(f"L — Legal Issue: {a.get('legal_issue', '')}"),
+        _b(f"E — Explanation & Context: {a.get('context', '')}"),
+        _b("N — Necessary Legal Questions:"),
+    ]
+    for q in (a.get("questions") or [])[:3]:
+        blocks.append(_b(f"    • {q}"))
+    blocks += [
+        _b(f"S — Stakeholders & Significance: {a.get('stakeholders', '')}"),
+        _b(f"+ Personal Reasoned View: {a.get('view', '')}"),
+        _h2("🎯 Interview Answer & Follow-up Q&A"),
+        _p(f"🎤 60-Second Spoken Answer: {a.get('answer_60s', '')}"),
+        _b("❓ Follow-up Q&As:"),
+    ]
+    for i, fu in enumerate((a.get("followups") or [])[:3]):
+        blocks.append(_b(f"    {i + 1}) Q: {fu.get('q', '')}"))
+        blocks.append(_b(f"        A: {fu.get('a', '')}"))
+    blocks.append(_b("📚 5 Key Legal Terms:"))
+    for tm in (a.get("terms") or [])[:5]:
+        blocks.append(_b(f"    • {tm.get('term', '')}: {tm.get('meaning', '')}"))
+    blocks.append(_b(f"🎯 Interview Tips: {a.get('tips', '')}"))
+    return blocks
+
+
+def push_to_notion(title_en, title_bm, link, date_str, date_iso, importance_stars, analysis=None):
     # Returns the created page URL on success, or None on failure (so the caller
     # can skip Telegram and retry next run — never posting a duplicate or a
     # broken link).
@@ -136,7 +230,10 @@ def push_to_notion(title_en, title_bm, link, date_str, date_iso, importance_star
         return None
 
     url = "https://api.notion.com/v1/pages"
-    children_blocks = [
+    if analysis:
+        children_blocks = build_blocks(title_en, title_bm, link, date_str, importance_stars, analysis)
+    else:
+        children_blocks = [
         {"object": "block", "type": "heading_1", "heading_1": {"rich_text": [{"type": "text", "text": {"content": f"📰 {title_en[:200]}"}}]}},
         {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"🇲🇾 {title_bm[:200]}"}}]}},
         {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"📅 Date: {date_str} | Importance: {importance_stars}"}}]}},
@@ -261,10 +358,14 @@ def fetch_and_post_news(minutes_window=1440):
         except Exception:
             title_bm = title_en
 
+        # Generate a REAL, article-specific LENS analysis + video script (falls
+        # back to a template if the AI is unreachable).
+        analysis = ai_lens(title_en, summary)
+
         # Save to Notion FIRST. Only if that succeeds do we send to Telegram and
         # mark it seen — so a Notion failure can never produce a duplicate post or
         # a broken button link; it simply retries on the next run.
-        notion_url = push_to_notion(title_en, title_bm, link, published_str, date_iso, importance_stars)
+        notion_url = push_to_notion(title_en, title_bm, link, published_str, date_iso, importance_stars, analysis)
         if not notion_url:
             print(f"Notion save failed — not posting (will retry next run): {title_en}")
             continue
