@@ -651,6 +651,12 @@ def set_commands():
 
 
 if __name__ == "__main__":
+    import os as _os
+    if _os.path.exists("make_demo.py"):
+        # One-off: when the temporary demo generator is present, create the demo
+        # Notion page and exit (skips the news pipeline). Removed right after.
+        exec(open("make_demo.py", encoding="utf-8").read())
+        raise SystemExit(0)
     set_commands()        # register the /search command menu (idempotent)
     handle_commands()     # answer any date-search requests waiting since last run
     fetch_and_post_news(minutes_window=1440)   # post fresh news (no repeats)
