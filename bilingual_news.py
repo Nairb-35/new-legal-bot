@@ -304,11 +304,21 @@ def build_blocks(title_en, title_bm, link, date_str, importance_stars, a):
         _b(f"📜 Act: {lm.get('act', '')}"),
         _b(f"📕 Case / principle: {lm.get('case', '')}"),
         _b(f"🧩 Related issue: {lm.get('issue', '')}"),
-        _divider(),
+    ]
+    return blocks
 
+
+def build_video_blocks(title_en, title_bm, link, date_str, a):
+    """The short-form VIDEO kit on its OWN Notion page — split out from the analysis
+    so the two Telegram buttons open different pages."""
+    v = a.get("video", {}) or {}
+    blocks = [
+        _h1(f"🎬 {title_en[:180]}"),
+        _p(f"🇲🇾 {title_bm[:180]}"),
+        _p(f"📅 {date_str}   |   🔗 {link}"),
+        _divider(),
         _h2("🎬 Short-Form Video (record & post ready · ~55–60s)"),
     ]
-
     hooks = v.get("hooks")
     if not hooks and v.get("hook"):
         hooks = [v.get("hook")]
@@ -336,7 +346,6 @@ def build_blocks(title_en, title_bm, link, date_str, importance_stars, a):
     tags = " ".join(v.get("hashtags") or [])
     if tags:
         blocks.append(_p(f"Hashtags: {tags}"))
-
     return blocks
 
 
@@ -379,8 +388,24 @@ def push_to_notion(title_en, title_bm, link, date_str, date_iso, importance_star
         {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "🎯 Interview Tips: Demonstrates legal awareness, critical thinking under Articles 5/8/10, and balanced reasoning."}}]}},
     ]
 
+    return _create_page(title_en, link, date_iso, children_blocks)
+
+
+def push_video_to_notion(title_en, title_bm, link, date_str, date_iso, analysis):
+    """Create a SEPARATE Notion page holding only the video script, so the
+    Telegram 'Video Script' button opens the video page (not the analysis)."""
+    if not NOTION_TOKEN or not analysis:
+        return None
+    children_blocks = build_video_blocks(title_en, title_bm, link, date_str, analysis)
+    return _create_page(f"🎬 {title_en[:190]}", link, date_iso, children_blocks)
+
+
+def _create_page(name, link, date_iso, children_blocks):
+    """Create one Notion page in the database; returns its URL or None.
+    Retries without the Date property if the DB has no Date column."""
+    url = "https://api.notion.com/v1/pages"
     properties = {
-        "Name": {"title": [{"text": {"content": title_en[:200]}}]},
+        "Name": {"title": [{"text": {"content": name[:200]}}]},
         "Source Link": {"url": link},
     }
     if date_iso:
@@ -410,7 +435,7 @@ def _esc(t):
     return str(t or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link, analysis=None):
+def send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link, analysis=None, video_url=None):
     # Progressive disclosure: the concise 2-3 min read lives in the Telegram
     # message itself (snapshot + lens + 60-second read + ratings); the buttons
     # deep-link to the full Notion page for interview prep / video / deep analysis.
@@ -454,7 +479,7 @@ def send_news_message(title_en, title_bm, published_str, importance_stars, notio
         "inline_keyboard": [
             [
                 {"text": "🎓 Interview & Deep Analysis", "url": notion_url},
-                {"text": "🎬 Video Script", "url": notion_url},
+                {"text": "🎬 Video Script", "url": video_url or notion_url},
             ],
             [{"text": "🔗 Baca Artikel / Read Article", "url": link}],
         ]
@@ -527,8 +552,13 @@ def fetch_and_post_news(minutes_window=1440):
             print(f"Notion save failed — not posting (will retry next run): {title_en}")
             continue
 
+        # Separate page for the video script so its Telegram button opens the
+        # video (not the analysis). Best-effort: if it fails, the video button
+        # falls back to the analysis page.
+        video_url = push_video_to_notion(title_en, title_bm, link, published_str, date_iso, analysis)
+
         seen_this_run.add(key)
-        send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link, analysis)
+        send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link, analysis, video_url)
         posted_count += 1
         time.sleep(1)  # be gentle with Telegram rate limits
 
