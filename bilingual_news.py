@@ -143,34 +143,35 @@ def ai_lens(title, summary):
             "model": "claude-sonnet-4-6",
             "max_tokens": 4000,
             "system": (
-                "You are a Malaysian law lecturer and interview coach. You do NOT just summarise news — you turn one "
-                "news item into legal understanding, critical thinking, interview prep and long-term memory, using the "
-                "Legal Insight Framework (LIF). Work only from the headline and short snippet. Be SPECIFIC and substantive "
-                "— never generic filler, never restate the headline. Ground everything in the real Malaysian legal framework "
-                "and name the ACTUAL statutes or constitutional Articles that genuinely apply (e.g. Federal Constitution "
-                "Art 5/8/10, Penal Code, Control of Supplies Act 1961, Criminal Procedure Code, Companies Act 2016, PDPA 2010, "
-                "Sedition Act 1948, etc.). Do NOT invent case citations or fake section numbers — if unsure, describe the "
-                "principle instead of citing. Ratings are integers 1–5.\n"
+                "You are a Malaysian law lecturer and interview coach. Turn ONE news item into a TIGHT, high-signal brief a "
+                "law student can learn in 2–3 minutes. Work only from the headline and short snippet. Be SPECIFIC — never "
+                "generic filler, never restate the headline, no padding. Ground everything in the real Malaysian legal "
+                "framework and name the ACTUAL statutes or constitutional Articles that genuinely apply (e.g. Federal "
+                "Constitution Art 5/8/10, Penal Code, Control of Supplies Act 1961, Criminal Procedure Code, Companies Act "
+                "2016, PDPA 2010). Do NOT invent case citations, fake section numbers, or grand-sounding 'doctrines' that "
+                "may not exist — if there is no established named doctrine, describe the principle in plain terms tied to the "
+                "actual statute (e.g. 'government regulation of essential goods via statutory powers under the Control of "
+                "Supplies Act 1961'), NOT an invented label. Be honest about certainty: separate what the article reports "
+                "from your legal inference from a possible future development. Ratings are integers 1–5 and MUST use the full "
+                "range — do not rate everything 4–5; reserve 5 for genuinely landmark items and use 1–2 for narrow/technical ones.\n"
                 "Output ONLY valid JSON (no markdown fences) with EXACTLY these keys: "
                 "jurisdiction (string, e.g. 'Malaysia'), "
                 "areas (array of 2–4 short strings, e.g. 'Constitutional', 'Criminal'), "
+                "lens (object with 'label' — ONE primary legal lens chosen from exactly: 'Constitutional Rights', "
+                "'Criminal Liability', 'Administrative Power', 'Judicial Review', 'Contractual Obligations', "
+                "'Corporate Governance', 'Statutory Regulation', 'Islamic/Syariah Law', 'Human Rights', 'Family Law' — "
+                "and 'why' (1–2 sentences: the deeper recurring legal theme this article really teaches, beyond the surface story)), "
                 "ratings (object with integer keys legal_impact, interview_value, exam_relevance, public_importance, longterm — each 1–5), "
-                "executive_brief (string, max 3 sentences, what happened), "
-                "why_lawyers_care (string, why it is LEGALLY significant, not political), "
-                "core_principle (string, name and explain the underlying legal principle/doctrine), "
-                "conflict (object with side_a, side_b, explanation — the two competing legal interests), "
-                "reasoning (array of 5 strings walking Facts -> Relevant principles -> Competing arguments -> Likely outcome -> Remaining uncertainty), "
-                "real_world_impact (array of 3–5 strings naming who actually feels this), "
-                "what_next (array of 2–4 strings, likely next legal steps e.g. appeal, judicial review, royal assent), "
-                "misunderstood (object with myth and reality — a common misconception vs the legal reality), "
-                "interview (object with why_topic (string, why an interviewer would pick this), opening_sentence (string, one strong opener), "
-                "insight (string, one non-obvious observation), followups (array of 3–5 strings, likely follow-up questions)), "
+                "brief (object with 'what' (1–2 sentences: what happened) and 'why' (1–2 sentences: why it matters legally)), "
+                "breakdown (object with 'principle' (the law behind this, grounded in a real statute/Article, NO invented doctrine names), "
+                "'interests' (the competing values/interests in tension, one line), 'impact' (who is actually affected in practice, one line)), "
+                "certainty (object with 'reported' (a fact the article states), 'implication' (your legal inference from it), "
+                "'forecast' (a plausible future legal development) — each one sentence), "
+                "interview (object with 'why_topic' (why an interviewer would pick this), 'insight' (one non-obvious observation), "
+                "'followups' (array of exactly 3 likely follow-up questions), 'model_answer' (a strong ~30-second / ~70-word spoken answer)), "
                 "think_deeper (string, ONE analytical open question), "
-                "connections (array of 2–4 strings linking to a famous case, another area of law, another country or a historical event), "
-                "remember (array of exactly 3 short strings — the principle, why it matters, the biggest unresolved issue), "
-                "further_reading (object with case, act, judgment, topic — one each), "
-                "memory_check (array of 3 short quiz questions, no answers), "
-                "hidden_question (string, the deeper question this story forces society to answer), "
+                "learn_more (object with 'act' (one relevant statute), 'case' (one relevant case, only if real — else a landmark principle), "
+                "'issue' (one related legal issue to explore)), "
                 "video (object for a 55–60s vertical short — keys: "
                 "hooks (array of 2 scroll-stopping opening lines, each <= 10 words, one bold/provocative and one curiosity-gap), "
                 "script (string, WORD-FOR-WORD spoken narration of ~130–150 words that reads naturally out loud in a punchy creator voice, "
@@ -221,22 +222,39 @@ def _stars(n):
     return "⭐" * n + "☆" * (5 - n)
 
 
+def _lens_badge(lens):
+    """Return an emoji + label for the article's primary legal lens."""
+    palette = {
+        "Constitutional Rights": "🟦", "Criminal Liability": "🟩",
+        "Administrative Power": "🟨", "Judicial Review": "🟥",
+        "Contractual Obligations": "🟪", "Corporate Governance": "🟫",
+        "Statutory Regulation": "🟧", "Islamic/Syariah Law": "🟩",
+        "Human Rights": "🟦", "Family Law": "🟪",
+    }
+    label = (lens or {}).get("label", "") or "Legal Theme"
+    return palette.get(label, "🧭"), label
+
+
 def build_blocks(title_en, title_bm, link, date_str, importance_stars, a):
-    """Real, article-specific blocks from the AI analysis `a`, laid out using the
-    Legal Insight Framework (LIF v1)."""
+    """Lean, article-specific Notion blocks from the AI analysis `a` — a 2-3 minute
+    read (Snapshot -> 60-Second Read -> Legal Lens -> Legal Breakdown -> Certainty
+    -> Interview -> Think Deeper -> Learn More), with the video kit last."""
     v = a.get("video", {}) or {}
     r = a.get("ratings", {}) or {}
-    conflict = a.get("conflict", {}) or {}
-    mis = a.get("misunderstood", {}) or {}
+    brief = a.get("brief", {}) or {}
+    bd = a.get("breakdown", {}) or {}
+    cert = a.get("certainty", {}) or {}
     interview = a.get("interview", {}) or {}
-    fr = a.get("further_reading", {}) or {}
+    lm = a.get("learn_more", {}) or {}
+    lens = a.get("lens", {}) or {}
+    lens_emoji, lens_label = _lens_badge(lens)
     areas = ", ".join(a.get("areas") or []) or "—"
 
     blocks = [
         _h1(f"📰 {title_en[:190]}"),
         _p(f"🇲🇾 {title_bm[:190]}"),
-        _p(f"📅 Date: {date_str}   |   🌍 Jurisdiction: {a.get('jurisdiction', 'Malaysia')}"),
-        _p(f"📚 Area(s) of law: {areas}"),
+        _p(f"📅 {date_str}   |   🌍 {a.get('jurisdiction', 'Malaysia')}   |   📚 {areas}"),
+        _p(f"{lens_emoji} Legal Lens: {lens_label}"),
         _p(f"🔗 Article URL: {link}"),
         _divider(),
 
@@ -248,88 +266,52 @@ def build_blocks(title_en, title_bm, link, date_str, importance_stars, a):
         _b(f"🔮 Long-term Signif.: {_stars(r.get('longterm'))}"),
         _divider(),
 
-        _h2("⚡ Executive Brief — What happened"),
-        _p(a.get("executive_brief", "")),
+        _h2("⚡ 60-Second Read"),
+        _b(f"📰 What happened: {brief.get('what', '')}"),
+        _b(f"⚖️ Why it matters: {brief.get('why', '')}"),
 
-        _h2("⚖️ Why Lawyers Care"),
-        _p(a.get("why_lawyers_care", "")),
+        _h2(f"{lens_emoji} Legal Lens — {lens_label}"),
+        _p(lens.get("why", "")),
 
-        _h2("🧠 The Core Legal Principle"),
-        _p(a.get("core_principle", "")),
+        _h2("⚖️ Legal Breakdown"),
+        _b(f"📖 Legal principle: {bd.get('principle', '')}"),
+        _b(f"⚔️ Competing interests: {bd.get('interests', '')}"),
+        _b(f"🌍 Practical impact: {bd.get('impact', '')}"),
 
-        _h2("⚔️ The Real Legal Conflict"),
-        _b(f"🅰️ {conflict.get('side_a', '')}"),
-        _b(f"🆚 vs {conflict.get('side_b', '')}"),
-        _p(conflict.get("explanation", "")),
-
-        _h2("🏛 Legal Reasoning (how a lawyer thinks it through)"),
-    ]
-    for step in (a.get("reasoning") or [])[:5]:
-        blocks.append(_b(step))
-
-    blocks.append(_h2("🌍 Real-World Impact"))
-    for imp in (a.get("real_world_impact") or [])[:5]:
-        blocks.append(_b(imp))
-
-    blocks.append(_h2("🔮 What Happens Next"))
-    for nx in (a.get("what_next") or [])[:4]:
-        blocks.append(_b(nx))
-
-    blocks += [
-        _h2("❌ What Most People Get Wrong"),
-        _b(f"Myth: {mis.get('myth', '')}"),
-        _b(f"Reality: {mis.get('reality', '')}"),
+        _h2("🧪 Fact vs Inference vs Forecast"),
+        _b(f"✅ Reported: {cert.get('reported', '')}"),
+        _b(f"⚖️ Legal implication: {cert.get('implication', '')}"),
+        _b(f"💭 Could develop: {cert.get('forecast', '')}"),
 
         _h2("🎓 Interview Corner"),
-        _b(f"Why interviewers like this topic: {interview.get('why_topic', '')}"),
-        _b(f"Best opening sentence: {interview.get('opening_sentence', '')}"),
+        _b(f"Why interviewers like this: {interview.get('why_topic', '')}"),
         _b(f"One impressive insight: {interview.get('insight', '')}"),
-        _b("Possible follow-up questions:"),
+        _b("Likely follow-up questions:"),
     ]
-    for fu in (interview.get("followups") or [])[:5]:
+    for fu in (interview.get("followups") or [])[:3]:
         blocks.append(_b(f"    • {fu}"))
+    blocks.append(_p(f"🎤 30-second model answer: {interview.get('model_answer', '')}"))
 
     blocks += [
-        _h2("💭 Think Like a Lawyer"),
+        _h2("🧠 Think Deeper"),
         _q(a.get("think_deeper", "")),
 
-        _h2("🔗 Connections"),
-    ]
-    for c in (a.get("connections") or [])[:4]:
-        blocks.append(_b(c))
-
-    blocks.append(_h2("📖 Remember This"))
-    for rem in (a.get("remember") or [])[:3]:
-        blocks.append(_b(f"✔ {rem}"))
-
-    blocks += [
-        _h2("🚀 Further Reading"),
-        _b(f"📕 Case: {fr.get('case', '')}"),
-        _b(f"📜 Act: {fr.get('act', '')}"),
-        _b(f"⚖️ Judgment: {fr.get('judgment', '')}"),
-        _b(f"🎓 Topic: {fr.get('topic', '')}"),
-
-        _h2("🧠 Memory Check (test yourself)"),
-    ]
-    for i, mc in enumerate((a.get("memory_check") or [])[:3]):
-        blocks.append(_b(f"{i + 1}. {mc}"))
-
-    blocks += [
-        _h2("🧩 The Hidden Question"),
-        _q(a.get("hidden_question", "")),
+        _h2("🔗 Learn More"),
+        _b(f"📜 Act: {lm.get('act', '')}"),
+        _b(f"📕 Case / principle: {lm.get('case', '')}"),
+        _b(f"🧩 Related issue: {lm.get('issue', '')}"),
         _divider(),
 
         _h2("🎬 Short-Form Video (record & post ready · ~55–60s)"),
     ]
 
     hooks = v.get("hooks")
-    if not hooks and v.get("hook"):  # backward-compat if AI returns old shape
+    if not hooks and v.get("hook"):
         hooks = [v.get("hook")]
     if hooks:
         blocks.append(_b("🪝 Hook options (test both):"))
         for h in hooks[:2]:
             blocks.append(_b(f"    • {h}"))
-
     if v.get("title"):
         blocks.append(_b(f"🏷 Title: {v.get('title')}"))
 
@@ -342,7 +324,6 @@ def build_blocks(title_en, title_bm, link, date_str, importance_stars, a):
         for i, bt in enumerate(beats[:5]):
             blocks.append(_b(f"{i + 1}. 🗣 {bt.get('say', '')}"))
             blocks.append(_b(f"    💬 {bt.get('caption', '')}   |   🎥 {bt.get('visual', '')}"))
-
     if v.get("takeaway"):
         blocks.append(_b(f"📌 Pinned-comment takeaway: {v.get('takeaway')}"))
 
@@ -420,18 +401,54 @@ def push_to_notion(title_en, title_bm, link, date_str, date_iso, importance_star
     return None
 
 
-def send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link):
-    message = (
-        f"🇬🇧 <b>{title_en}</b>\n"
-        f"🇲🇾 <i>{title_bm}</i>\n"
-        f"📅 <b>Tarikh / Date:</b> {published_str}\n"
-        f"⭐ <b>Kepentingan / Importance:</b> {importance_stars}"
-    )
+def _esc(t):
+    """Escape for Telegram HTML parse mode."""
+    return str(t or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link, analysis=None):
+    # Progressive disclosure: the concise 2-3 min read lives in the Telegram
+    # message itself (snapshot + lens + 60-second read + ratings); the buttons
+    # deep-link to the full Notion page for interview prep / video / deep analysis.
+    a = analysis or {}
+    brief = a.get("brief", {}) or {}
+    lens = a.get("lens", {}) or {}
+    r = a.get("ratings", {}) or {}
+    lens_emoji, lens_label = _lens_badge(lens)
+
+    lines = [
+        f"🇬🇧 <b>{_esc(title_en)}</b>",
+        f"🇲🇾 <i>{_esc(title_bm)}</i>",
+    ]
+    if lens_label:
+        lines.append(f"{lens_emoji} <b>Legal Lens:</b> {_esc(lens_label)}")
+    lines.append(f"📅 {_esc(published_str)}")
+
+    if brief.get("what") or brief.get("why"):
+        lines.append("")
+        lines.append("⚡ <b>60-Second Read</b>")
+        if brief.get("what"):
+            lines.append(f"📰 <b>What:</b> {_esc(brief.get('what'))}")
+        if brief.get("why"):
+            lines.append(f"⚖️ <b>Why it matters:</b> {_esc(brief.get('why'))}")
+
+    if r:
+        lines.append("")
+        lines.append(
+            "⭐ <b>Ratings</b> — "
+            f"Legal {_stars(r.get('legal_impact'))} · "
+            f"Interview {_stars(r.get('interview_value'))} · "
+            f"Exam {_stars(r.get('exam_relevance'))}"
+        )
+    else:
+        lines.append(f"⭐ <b>Importance:</b> {_esc(importance_stars)}")
+
+    message = "\n".join(lines)[:3900]
     reply_markup = {
         "inline_keyboard": [
             [
-                {"text": "🎬 Video Script Prompt", "url": notion_url},
-                {"text": "⚖️ LENS Analysis", "url": notion_url},
+                {"text": "🎓 Interview & Deep Analysis", "url": notion_url},
+                {"text": "🎬 Video Script", "url": notion_url},
             ],
             [{"text": "🔗 Baca Artikel / Read Article", "url": link}],
         ]
@@ -505,7 +522,7 @@ def fetch_and_post_news(minutes_window=1440):
             continue
 
         seen_this_run.add(key)
-        send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link)
+        send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link, analysis)
         posted_count += 1
         time.sleep(1)  # be gentle with Telegram rate limits
 
