@@ -162,7 +162,10 @@ def ai_lens(title, summary):
                 "'Corporate Governance', 'Statutory Regulation', 'Islamic/Syariah Law', 'Human Rights', 'Family Law' — "
                 "and 'why' (1–2 sentences: the deeper recurring legal theme this article really teaches, beyond the surface story)), "
                 "ratings (object with integer keys legal_impact, interview_value, exam_relevance, public_importance, longterm — each 1–5), "
-                "brief (object with 'what' (1–2 sentences: what happened) and 'why' (1–2 sentences: why it matters legally)), "
+                "brief (object with 'facts' (1–2 sentences: what actually happened, as reported), "
+                "'statute' (the specific statute / constitutional Article / legal instrument that governs this — name it precisely, "
+                "e.g. 'Control of Supplies Act 1961' or 'Art 11 Federal Constitution'; if genuinely none yet, say 'No specific statute — governed by common law / general principles'), "
+                "and 'importance' (1–2 sentences: why it matters legally)), "
                 "breakdown (object with 'principle' (the law behind this, grounded in a real statute/Article, NO invented doctrine names), "
                 "'interests' (the competing values/interests in tension, one line), 'impact' (who is actually affected in practice, one line)), "
                 "certainty (object with 'reported' (a fact the article states), 'implication' (your legal inference from it), "
@@ -267,8 +270,9 @@ def build_blocks(title_en, title_bm, link, date_str, importance_stars, a):
         _divider(),
 
         _h2("⚡ 60-Second Read"),
-        _b(f"📰 What happened: {brief.get('what', '')}"),
-        _b(f"⚖️ Why it matters: {brief.get('why', '')}"),
+        _b(f"📋 Facts: {brief.get('facts', '')}"),
+        _b(f"📜 Statute: {brief.get('statute', '')}"),
+        _b(f"⭐ Importance: {brief.get('importance', '')}"),
 
         _h2(f"{lens_emoji} Legal Lens — {lens_label}"),
         _p(lens.get("why", "")),
@@ -424,13 +428,15 @@ def send_news_message(title_en, title_bm, published_str, importance_stars, notio
         lines.append(f"{lens_emoji} <b>Legal Lens:</b> {_esc(lens_label)}")
     lines.append(f"📅 {_esc(published_str)}")
 
-    if brief.get("what") or brief.get("why"):
+    if brief.get("facts") or brief.get("statute") or brief.get("importance"):
         lines.append("")
         lines.append("⚡ <b>60-Second Read</b>")
-        if brief.get("what"):
-            lines.append(f"📰 <b>What:</b> {_esc(brief.get('what'))}")
-        if brief.get("why"):
-            lines.append(f"⚖️ <b>Why it matters:</b> {_esc(brief.get('why'))}")
+        if brief.get("facts"):
+            lines.append(f"📋 <b>Facts:</b> {_esc(brief.get('facts'))}")
+        if brief.get("statute"):
+            lines.append(f"📜 <b>Statute:</b> {_esc(brief.get('statute'))}")
+        if brief.get("importance"):
+            lines.append(f"⭐ <b>Importance:</b> {_esc(brief.get('importance'))}")
 
     if r:
         lines.append("")
