@@ -635,10 +635,24 @@ def handle_update(u):
     low = text.lower()
     if low.startswith("/start") or low.startswith("/help"):
         _send(chat_id,
-              "🔎 <b>Search past legal news</b>\n\n"
-              "Send <code>/search YYYY-MM-DD</code> — e.g. <code>/search 2026-07-15</code> "
-              "(also accepts <code>15/07/2026</code> or <code>15 July 2026</code>) — "
-              "and I'll return every article saved for that date with its Video Script &amp; LENS links.")
+              "⚖️ <b>Malaysian Legal News Bot</b>\n\n"
+              "📰 <code>/news</code> — check for the latest news right now\n"
+              "🔎 <code>/search YYYY-MM-DD</code> — find past news by date "
+              "(e.g. <code>/search 2026-07-15</code>, also accepts <code>15/07/2026</code> or <code>15 July 2026</code>)\n\n"
+              "I also post fresh legal news automatically as it breaks.")
+        return
+
+    if low.startswith("/news"):
+        # Check for fresh news on demand. Posts any new articles to the group
+        # (deduped, so never a repeat); if nothing new, say so.
+        _send(chat_id, "🔍 Checking for the latest legal news…")
+        try:
+            posted = fetch_and_post_news(minutes_window=1440)
+        except Exception as e:
+            print("/news fetch error:", e)
+            posted = 0
+        if not posted:
+            _send(chat_id, "📭 <b>No news yet!</b>\nNothing new since the last update — I'll keep watching and post the moment something breaks. ⚖️")
         return
 
     if low.startswith("/search") or parse_date_query(text):
@@ -685,6 +699,7 @@ def handle_commands():
 
 def set_commands():
     tg("setMyCommands", {"commands": [
+        {"command": "news", "description": "Check for the latest legal news now"},
         {"command": "search", "description": "Search past legal news by date (e.g. /search 2026-07-15)"},
         {"command": "help", "description": "How to use this bot"},
     ]})
