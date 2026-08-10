@@ -508,60 +508,64 @@ def fetch_and_post_news(minutes_window=1440):
     print(f"Total entries fetched from Google News RSS: {len(feed.entries)}")
 
     for entry in feed.entries:
-        title_en = (entry.title or "").strip()
-        summary = getattr(entry, 'summary', '')
-        link = entry.link
-
-        if not is_genuinely_legal_or_political(title_en, summary):
-            continue
-
-        key = normalize_title(title_en)
-        if not key or key in seen_this_run:
-            continue
-
-        # Time window + date
-        date_iso = now.strftime("%Y-%m-%d")
-        published_str = "Today"
-        if getattr(entry, 'published_parsed', None):
-            pub = datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
-            if now - pub > timedelta(minutes=minutes_window):
-                continue
-            published_str = pub.strftime("%d %B %Y")
-            date_iso = pub.strftime("%Y-%m-%d")
-
-        # Persistent de-dupe against Notion (fixes the repeats)
-        if already_in_notion(title_en, link):
-            seen_this_run.add(key)
-            continue
-
-        importance_stars = get_importance_rating(title_en, summary)
         try:
-            title_bm = translator.translate(title_en) or title_en
-        except Exception:
-            title_bm = title_en
+            title_en = (entry.title or "").strip()
+            summary = getattr(entry, 'summary', '')
+            link = entry.link
 
-        # Generate a REAL, article-specific LENS analysis + video script (falls
-        # back to a template if the AI is unreachable).
-        analysis = ai_lens(title_en, summary)
+            if not is_genuinely_legal_or_political(title_en, summary):
+                continue
 
-        # Save to Notion FIRST. Only if that succeeds do we send to Telegram and
-        # mark it seen — so a Notion failure can never produce a duplicate post or
-        # a broken button link; it simply retries on the next run.
-        notion_url = push_to_notion(title_en, title_bm, link, published_str, date_iso, importance_stars, analysis)
-        if not notion_url:
-            print(f"Notion save failed — not posting (will retry next run): {title_en}")
+            key = normalize_title(title_en)
+            if not key or key in seen_this_run:
+                continue
+
+            # Time window + date
+            date_iso = now.strftime("%Y-%m-%d")
+            published_str = "Today"
+            if getattr(entry, 'published_parsed', None):
+                pub = datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
+                if now - pub > timedelta(minutes=minutes_window):
+                    continue
+                published_str = pub.strftime("%d %B %Y")
+                date_iso = pub.strftime("%Y-%m-%d")
+
+            # Persistent de-dupe against Notion (fixes the repeats)
+            if already_in_notion(title_en, link):
+                seen_this_run.add(key)
+                continue
+
+            importance_stars = get_importance_rating(title_en, summary)
+            try:
+                title_bm = translator.translate(title_en) or title_en
+            except Exception:
+                title_bm = title_en
+
+            # Generate a REAL, article-specific LENS analysis + video script (falls
+            # back to a template if the AI is unreachable).
+            analysis = ai_lens(title_en, summary)
+
+            # Save to Notion FIRST. Only if that succeeds do we send to Telegram and
+            # mark it seen — so a Notion failure can never produce a duplicate post or
+            # a broken button link; it simply retries on the next run.
+            notion_url = push_to_notion(title_en, title_bm, link, published_str, date_iso, importance_stars, analysis)
+            if not notion_url:
+                print(f"Notion save failed — not posting (will retry next run): {title_en}")
+                continue
+
+            # Separate page for the video script so its Telegram button opens the
+            # video (not the analysis). Best-effort: if it fails, the video button
+            # falls back to the analysis page.
+            video_url = push_video_to_notion(title_en, title_bm, link, published_str, date_iso, analysis)
+
+            seen_this_run.add(key)
+            send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link, analysis, video_url)
+            posted_count += 1
+            time.sleep(1)  # be gentle with Telegram rate limits
+
+        except Exception as _e:
+            print(f"Skipping one article due to error: {_e}")
             continue
-
-        # Separate page for the video script so its Telegram button opens the
-        # video (not the analysis). Best-effort: if it fails, the video button
-        # falls back to the analysis page.
-        video_url = push_video_to_notion(title_en, title_bm, link, published_str, date_iso, analysis)
-
-        seen_this_run.add(key)
-        send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link, analysis, video_url)
-        posted_count += 1
-        time.sleep(1)  # be gentle with Telegram rate limits
-
     print(f"Posted {posted_count} new article(s).")
     return posted_count
 
