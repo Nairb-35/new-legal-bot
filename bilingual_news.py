@@ -632,7 +632,16 @@ def handle_update(u):
     if not text or chat_id is None:
         return
 
+    # Diagnostic: log the chat id of every update so we can find the correct
+    # TELEGRAM_CHAT_ID after a group migration (supergroup ids change).
+    chat_type = msg.get("chat", {}).get("type")
+    print(f"Received update from chat_id={chat_id} (type={chat_type}) text={text[:40]!r}")
+
     low = text.lower()
+    if low.startswith("/id"):
+        _send(chat_id, f"🆔 This chat's ID is:\n<code>{chat_id}</code>\n\nSet this as the bot's TELEGRAM_CHAT_ID secret so news posts here.")
+        return
+
     if low.startswith("/start") or low.startswith("/help"):
         _send(chat_id,
               "⚖️ <b>Malaysian Legal News Bot</b>\n\n"
