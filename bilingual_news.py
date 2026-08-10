@@ -498,7 +498,7 @@ def send_news_message(title_en, title_bm, published_str, importance_stars, notio
 # ---------------------------------------------------------------------------
 # Main news pipeline
 # ---------------------------------------------------------------------------
-def fetch_and_post_news(minutes_window=4320, max_posts=8):
+def fetch_and_post_news(minutes_window=1440, max_posts=8):
     translator = GoogleTranslator(source='en', target='ms')
     feed = feedparser.parse(FEED_URL)
     now = datetime.now(timezone.utc)
@@ -658,7 +658,7 @@ def handle_update(u):
         # (deduped, so never a repeat); if nothing new, say so.
         _send(chat_id, "🔍 Checking for the latest legal news…")
         try:
-            posted = fetch_and_post_news(minutes_window=4320)
+            posted = fetch_and_post_news(minutes_window=1440)
         except Exception as e:
             print("/news fetch error:", e)
             posted = 0
@@ -719,4 +719,4 @@ def set_commands():
 if __name__ == "__main__":
     set_commands()        # register the /search command menu (idempotent)
     handle_commands()     # answer any date-search requests waiting since last run
-    fetch_and_post_news(minutes_window=4320)   # post fresh news (no repeats)
+    fetch_and_post_news(minutes_window=1440)   # post fresh news (no repeats)
