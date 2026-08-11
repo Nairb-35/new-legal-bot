@@ -180,6 +180,7 @@ def ai_lens(title, summary):
                 "script (string, WORD-FOR-WORD spoken narration of ~130–150 words that reads naturally out loud in a punchy creator voice, "
                 "opens with the strongest hook, explains the story and why it legally matters, and ends with a call to follow — no stage directions inside it), "
                 "beats (array of 4–5 objects each with 'say' (the spoken line for this beat), 'caption' (short on-screen text overlay, <= 6 words) and 'visual' (a simple b-roll / shot suggestion)), "
+                "broll (array of 10–16 SHORT, LITERAL stock-video search phrases — 2 to 4 plain English words each — ONE per sentence of the script, in the SAME order as the script; each must name a concrete, filmable thing that visually suits THAT sentence and that a free stock site would actually have, e.g. 'courtroom gavel', 'parliament building', 'police car lights', 'handcuffs close up', 'stock market screen', 'flooded street', 'hospital hallway', 'counting cash money', 'person signing contract', 'city skyline night'; use universal nouns only — NO proper names, NO Malaysian-specific terms, NO abstract ideas or statute numbers, translate the idea into a generic visual), "
                 "takeaway (string, one memorable line usable as the pinned comment), "
                 "post_caption (string, ready-to-paste caption for the post), "
                 "hashtags (array of 5–7 short hashtag strings without spaces), "
@@ -214,6 +215,10 @@ def _p(t): return {"object": "block", "type": "paragraph", "paragraph": _rt(t)}
 def _b(t): return {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": _rt(t)}
 def _q(t): return {"object": "block", "type": "quote", "quote": _rt(t)}
 def _divider(): return {"object": "block", "type": "divider", "divider": {}}
+def _code(t):
+    return {"object": "block", "type": "code",
+            "code": {"language": "plain text",
+                     "rich_text": [{"type": "text", "text": {"content": str(t)[:1990]}}]}}
 
 
 def _stars(n):
@@ -346,6 +351,28 @@ def build_video_blocks(title_en, title_bm, link, date_str, a):
     tags = " ".join(v.get("hashtags") or [])
     if tags:
         blocks.append(_p(f"Hashtags: {tags}"))
+
+    # One-click render block: copy the whole code box, then run LawVideoMaker's
+    # make.bat. Backgrounds are the AI's per-sentence b-roll terms (fallback: beat
+    # visuals), so each video's footage suits its own topic.
+    script_txt = (v.get("script") or "").strip()
+    if script_txt:
+        broll = v.get("broll") or [bt.get("visual", "") for bt in beats]
+        broll = [re.sub(r"\s+", " ", str(x)).strip(" -•|") for x in broll]
+        broll = [x for x in broll if x]
+        payload = (
+            "===LAWVID===\n"
+            f"TITLE: {(v.get('title') or title_en)[:70]}\n"
+            "SCRIPT:\n"
+            f"{script_txt[:1500]}\n"
+            "BROLL:\n"
+            f"{' | '.join(broll)[:350]}\n"
+            "===END==="
+        )
+        blocks.append(_divider())
+        blocks.append(_h2("⚡ One-Click Render Block"))
+        blocks.append(_p("Copy this whole box → double-click make.bat in LawVideoMaker → the finished video opens."))
+        blocks.append(_code(payload))
     return blocks
 
 
