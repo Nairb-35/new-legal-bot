@@ -43,6 +43,26 @@ async function ghDispatch() {
   });
 }
 
+// De-duplicate Telegram webhook retries: Telegram re-sends the SAME update_id if
+// we don't reply fast enough, which was causing two renders per tap. We remember
+// recently-handled update_ids in seen.json and skip repeats.
+async function alreadyHandled(uid) {
+  if (uid == null) return false;
+  const url = `https://api.github.com/repos/${REPO}/contents/seen.json`;
+  let sha, list = [];
+  try {
+    const g = await fetch(url + '?ref=main', { headers: ghHeaders });
+    if (g.ok) { const j = await g.json(); sha = j.sha; list = JSON.parse(Buffer.from(j.content, 'base64').toString('utf-8')); }
+  } catch (e) {}
+  if (!Array.isArray(list)) list = [];
+  if (list.includes(uid)) return true;         // this update was already handled — skip
+  list.push(uid); if (list.length > 50) list = list.slice(-50);
+  const body = { message: 'seen', content: Buffer.from(JSON.stringify(list)).toString('base64'), branch: 'main' };
+  if (sha) body.sha = sha;
+  try { await fetch(url, { method: 'PUT', headers: ghHeaders, body: JSON.stringify(body) }); } catch (e) {}
+  return false;
+}
+
 const PROG0 = '🎬 <b>Making AI video…</b>\n\n░░░░░░░░░░  0%\n<i>Queued — starting…</i>';
 
 async function startVideo(chat, replyTo, pageId, isVtest) {
@@ -89,6 +109,8 @@ module.exports = async (req, res) => {
   let u = req.body;
   if (!u || typeof u !== 'object') { try { u = JSON.parse(await readRaw(req)); } catch (e) { u = {}; } }
   try {
+    // Ignore Telegram's retry of an update we already processed (was causing 2 videos per tap).
+    if (await alreadyHandled(u.update_id)) { res.status(200).send('ok'); return; }
     const cq = u.callback_query;
     if (cq) {
       const data = cq.data || '';
