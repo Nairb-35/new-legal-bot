@@ -4,7 +4,7 @@ Runs on the GitHub Actions runner (called by bilingual_news.py). Uses the bundle
 `lib/` background clips (keyword-matched) so it never depends on a live stock site.
 Deps (edge-tts, imageio-ffmpeg, pillow, numpy) are installed on demand by the caller.
 """
-import asyncio, os, subprocess, re
+import asyncio, os, subprocess, re, glob
 import numpy as np
 import edge_tts, imageio_ffmpeg
 from PIL import Image, ImageDraw, ImageFilter
@@ -19,26 +19,49 @@ HFPS = 15
 
 # ---- map an AI b-roll term to one of the bundled library clips ----
 LIB_MAP = [
-    (("sign","signature","contract","document","paper","form","pen"), "signing"),
+    (("sign","signature","contract","pen"), "signing"),
+    (("prison","jail","cell","convict","detain","inmate","sentence"), "prison"),
+    (("police","arrest","officer","raid","cop","crime scene"), "police"),
+    (("money","cash","fund","fine","fraud","bribe","financial","salary","tax","payment","bank"), "money"),
     (("court","judge","gavel","ruling","ruled","tribunal","verdict","judicial","trial","lawsuit"), "court"),
-    (("parliament","minister","government","cabinet","ministry","official","policy","authority","department","office"), "building"),
+    (("parliament","minister","government","cabinet","ministry","official","policy","authority","department"), "building"),
+    (("student","study","university","school","exam","class","learn","campus"), "students"),
+    (("road","traffic","car","highway","vehicle","drive","accident"), "road"),
+    (("document","file","paper","report","record","form","desk"), "document"),
+    (("office","company","corporate","business","work","employee","meeting","deal","agreement","handshake","negotiat"), "office"),
     (("stair","climb","journey","rise","steps","struggle","fight all"), "stairs"),
     (("protest","rally","crowd","demonstration","march","riot"), "protest"),
-    (("deal","agreement","handshake","business","company","corporate","negotiat","meeting"), "handshake"),
     (("family","child","kid","home","parent","together","baby","custody"), "family"),
     (("mother","woman","man","person","worried","sad","think","alone","victim","people","citizen"), "person"),
-    (("city","skyline","kuala","urban","town","night","street","building"), "city"),
+    (("city","skyline","kuala","urban","town","night","street"), "city"),
     (("book","law","read","word","letter","constitution","statute","act","clause","interpret","rule","page","fine print"), "book"),
 ]
-DEFAULT_ROT = ["court", "building", "book", "city"]
-def resolve(term, i):
+DEFAULT_ROT = ["court", "building", "book", "city", "office", "document"]
+
+def _variants(slug):
+    return sorted(glob.glob(os.path.join(LIB, slug + "*.mp4")))
+
+def resolve(term, i, seed=0, avoid=None):
+    """Map a term to a category, then pick ONE of that category's clip variants,
+    varying by (seed+i) so different videos and different lines get different
+    footage; never repeat the immediately-previous clip when a variant exists."""
     s = (term or "").lower()
-    for kws, slug in LIB_MAP:
+    slug = None
+    for kws, sl in LIB_MAP:
         if any(k in s for k in kws):
-            p = os.path.join(LIB, slug + ".mp4")
-            if os.path.exists(p): return p
-    p = os.path.join(LIB, DEFAULT_ROT[i % len(DEFAULT_ROT)] + ".mp4")
-    return p if os.path.exists(p) else None
+            slug = sl; break
+    vs = _variants(slug) if slug else []
+    if not vs:  # unmatched term or that category has no clips → rotate a default
+        for d in [DEFAULT_ROT[(i + seed) % len(DEFAULT_ROT)]] + DEFAULT_ROT:
+            vs = _variants(d)
+            if vs: break
+    if not vs:
+        return None
+    idx = (i + seed) % len(vs)
+    pick = vs[idx]
+    if avoid and pick == avoid and len(vs) > 1:
+        pick = vs[(idx + 1) % len(vs)]
+    return pick
 
 # ---- voice + timing ----
 def _synth(script, audio):
@@ -149,10 +172,11 @@ def render(title, script, broll_terms, out_path, progress=None):
     starts = [0.0] + [sentz[i][1] for i in range(1, len(sentz))]
     ends = starts[1:] + [AUD]
     terms = broll_terms or []
+    seed = sum(ord(c) for c in (script[:300] or "x")) % 89   # varies the footage picked per video
     last = None; lines = []
     for i in range(len(sentz)):
         term = terms[i] if i < len(terms) else sentz[i][0]
-        src = resolve(term, i) or last
+        src = resolve(term, i, seed, avoid=last) or last
         if src: last = src
         dur = max(0.6, ends[i]-starts[i]); seg = os.path.join(WORK, f"s{i:02d}.mp4")
         if src:

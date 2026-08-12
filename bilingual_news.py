@@ -825,17 +825,16 @@ def render_and_send(chat_id, title, script, broll, reply_to=None, mid=None, canc
 
 # ---- webhook job queue: the Vercel webhook writes job.json + triggers a run ----
 def _delete_repo_file(path):
-    """Remove a file from the repo so a job never re-runs on the next cron. Uses the PAT."""
-    if not BOT_GH_TOKEN:
+    """Remove a file from the repo so a job never re-runs on the next cron. Uses
+    the checkout's own git credentials (actions/checkout persists a token), so no
+    extra token needs to be exposed to the Actions environment."""
+    if not os.path.exists(path):
         return
     try:
-        url = f"https://api.github.com/repos/{BOT_REPO}/contents/{path}"
-        h = {"Authorization": f"Bearer {BOT_GH_TOKEN}", "Accept": "application/vnd.github+json", "User-Agent": "lawbot"}
-        g = requests.get(url + "?ref=main", headers=h, timeout=15)
-        if g.status_code != 200:
-            return
-        requests.request("DELETE", url, headers=h, timeout=15,
-                         json={"message": f"clear {path}", "sha": g.json().get("sha"), "branch": "main"})
+        subprocess.run(["git", "rm", "-f", "--quiet", path], check=False)
+        subprocess.run(["git", "-c", "user.email=bot@users.noreply.github.com",
+                        "-c", "user.name=news-bot", "commit", "-q", "-m", f"clear {path}"], check=False)
+        subprocess.run(["git", "push", "-q", "origin", "HEAD:main"], check=False)
     except Exception as e:
         print("delete repo file error:", e)
 
