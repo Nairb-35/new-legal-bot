@@ -6,6 +6,7 @@ import re
 import sys
 import json
 import subprocess
+import threading
 from datetime import datetime, timezone, timedelta
 from deep_translator import GoogleTranslator
 
@@ -719,35 +720,76 @@ def _ensure_video_deps():
             subprocess.run([sys.executable, "-m", "pip", "install", "-q", pkg], check=True)
 
 
-def _send_video(chat_id, path, caption=""):
+def _send_get_id(chat_id, text, reply_to=None):
+    """Send a message and return its message_id (so we can live-edit it)."""
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+    if reply_to:
+        payload["reply_to_message_id"] = reply_to
+    res = tg("sendMessage", payload)
+    try:
+        return res.json()["result"]["message_id"]
+    except Exception:
+        return None
+
+
+def _edit(chat_id, message_id, text):
+    if message_id is None:
+        return
+    tg("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text,
+                           "parse_mode": "HTML", "disable_web_page_preview": True})
+
+
+def _send_video(chat_id, path, caption="", reply_to=None):
     if not TELEGRAM_BOT_TOKEN:
         return None
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
+    data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML", "supports_streaming": "true"}
+    if reply_to:
+        data["reply_to_message_id"] = reply_to
     try:
         with open(path, "rb") as f:
-            return requests.post(url, data={"chat_id": chat_id, "caption": caption,
-                                            "supports_streaming": "true"},
-                                 files={"video": f}, timeout=600)
+            return requests.post(url, data=data, files={"video": f}, timeout=600)
     except Exception as e:
         print("sendVideo error:", e)
         return None
 
 
-def render_and_send(chat_id, title, script, broll):
-    """Render the video from a script and send it to the chat. Blocks a few min."""
-    _send(chat_id, "🎬 <b>Making your AI video…</b>\nVoice, captions, backgrounds and your host — this takes a few minutes. I'll drop it here when it's ready. ⏳")
+def render_and_send(chat_id, title, script, broll, reply_to=None):
+    """Render the video and send it to the chat, threaded under the news post
+    (reply_to) with a live elapsed-time ticker so it's clear which video is
+    building and how long it's taking. Blocks a few minutes."""
+    label = (title or "your video").strip()
+    lab = _esc(label[:80])
+    mid = _send_get_id(chat_id,
+                       f"🎬 <b>Making AI video</b> for:\n“{lab}”\n\n⏳ 0:00 · usually 2–4 min…",
+                       reply_to)
+    stop = threading.Event()
+    t0 = time.time()
+
+    def ticker():
+        while not stop.wait(15):
+            m, s = divmod(int(time.time() - t0), 60)
+            _edit(chat_id, mid, f"🎬 <b>Making AI video</b> for:\n“{lab}”\n\n⏳ {m}:{s:02d} elapsed · rendering…")
+    th = threading.Thread(target=ticker, daemon=True)
+    th.start()
     try:
         _ensure_video_deps()
         import video_maker
         out = os.path.join(os.getcwd(), "ai_short.mp4")
         video_maker.render(title or "Malaysian Law", script, broll, out)
-        res = _send_video(chat_id, out, caption="🎬 Your AI law short — ready to post! Follow-worthy? 😄")
+        stop.set(); th.join(timeout=2)
+        m, s = divmod(int(time.time() - t0), 60)
+        _edit(chat_id, mid, f"✅ <b>Video ready</b> for “{lab}” — rendered in {m}:{s:02d}. Uploading… 📤")
+        res = _send_video(chat_id, out,
+                          caption=f"🎬 <b>{lab}</b>\nYour AI law short — ready to post! 😄",
+                          reply_to=reply_to)
         if res is None or res.status_code != 200:
-            _send(chat_id, f"⚠️ Rendered but upload failed (status {getattr(res, 'status_code', '?')}). File may be too large.")
+            _edit(chat_id, mid, f"⚠️ Rendered “{lab}” but upload failed (status {getattr(res, 'status_code', '?')}). File may be too large.")
     except Exception as e:
+        stop.set()
         import traceback
         traceback.print_exc()
-        _send(chat_id, f"⚠️ Sorry, the video render failed: {str(e)[:200]}")
+        _edit(chat_id, mid, f"⚠️ Sorry, the video render failed for “{lab}”: {str(e)[:150]}")
 
 
 def handle_update(u):
@@ -756,7 +798,9 @@ def handle_update(u):
     cq = u.get("callback_query")
     if cq:
         data = cq.get("data") or ""
-        cq_chat = (cq.get("message") or {}).get("chat", {}).get("id")
+        cq_msg = cq.get("message") or {}
+        cq_chat = cq_msg.get("chat", {}).get("id")
+        cq_mid = cq_msg.get("message_id")   # the news post — reply under it
         tg("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "🎬 Starting your video…"})
         if data.startswith("v:") and cq_chat is not None:
             payload = _fetch_render_block(data[2:])
@@ -765,7 +809,7 @@ def handle_update(u):
                 return
             title, script, broll = _parse_render_block(payload)
             if script:
-                render_and_send(cq_chat, title, script, broll)
+                render_and_send(cq_chat, title, script, broll, reply_to=cq_mid)
             else:
                 _send(cq_chat, "⚠️ No script found to render on that page.")
         return
@@ -786,11 +830,12 @@ def handle_update(u):
     if low.startswith("/vtest"):
         # Render a canned short end-to-end — tests the whole video pipeline.
         render_and_send(
-            chat_id, "Test",
+            chat_id, "Test video",
             "Here's a quick test of the AI video maker. It builds the voice, the captions, "
             "and the cartoon host on real backgrounds. If you can see this, everything works. "
             "Follow for more Malaysian law, made simple.",
-            ["courtroom gavel", "parliament building", "law book pages", "kuala lumpur skyline"])
+            ["courtroom gavel", "parliament building", "law book pages", "kuala lumpur skyline"],
+            reply_to=msg.get("message_id"))
         return
 
     if low.startswith("/id"):
