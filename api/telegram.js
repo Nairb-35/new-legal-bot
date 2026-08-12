@@ -69,7 +69,23 @@ function readRaw(req) {
 }
 
 module.exports = async (req, res) => {
-  if (req.method !== 'POST') { res.status(200).send('ok'); return; }
+  if (req.method !== 'POST') {
+    // Self-setup: visiting /api/telegram?setup=1 points Telegram's webhook at
+    // this URL using the bot token already stored in Vercel env — no need to
+    // paste the token into a browser. ?setup=off removes it.
+    try {
+      const q = req.url || '';
+      if (q.includes('setup=1')) {
+        const r = await tg('setWebhook', { url: `https://${req.headers.host}/api/telegram` });
+        res.status(200).json(r); return;
+      }
+      if (q.includes('setup=off')) {
+        const r = await tg('deleteWebhook', {});
+        res.status(200).json(r); return;
+      }
+    } catch (e) {}
+    res.status(200).send('ok'); return;
+  }
   let u = req.body;
   if (!u || typeof u !== 'object') { try { u = JSON.parse(await readRaw(req)); } catch (e) { u = {}; } }
   try {
