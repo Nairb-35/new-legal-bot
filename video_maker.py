@@ -16,6 +16,28 @@ os.makedirs(WORK, exist_ok=True)
 FF = imageio_ffmpeg.get_ffmpeg_exe()
 VOICE, RATE = "en-US-AndrewNeural", "+8%"
 HFPS = 15
+PEXELS_PROXY = "https://new-legal-bot.vercel.app/api/pexels"   # returns a fresh Pexels clip URL if a key is set
+
+def _pexels_fetch(term, idx):
+    """Ask the Vercel proxy for a fresh Pexels clip for this term and download it
+    (unique footage per video). Returns a local path, or None to fall back to lib."""
+    try:
+        import requests
+        r = requests.get(PEXELS_PROXY, params={"q": term, "i": idx}, timeout=15)
+        u = (r.json() or {}).get("url")
+        if not u:
+            return None
+        slug = re.sub(r"[^a-z0-9]+", "_", (term or "").lower()).strip("_")[:36]
+        dst = os.path.join(WORK, f"px_{slug}_{idx}.mp4")
+        if os.path.exists(dst) and os.path.getsize(dst) > 200000:
+            return dst
+        with requests.get(u, timeout=90, stream=True) as g:
+            with open(dst, "wb") as f:
+                for chunk in g.iter_content(65536):
+                    f.write(chunk)
+        return dst if (os.path.exists(dst) and os.path.getsize(dst) > 200000) else None
+    except Exception:
+        return None
 
 # ---- map an AI b-roll term to one of the bundled library clips ----
 LIB_MAP = [
@@ -176,7 +198,7 @@ def render(title, script, broll_terms, out_path, progress=None):
     last = None; lines = []
     for i in range(len(sentz)):
         term = terms[i] if i < len(terms) else sentz[i][0]
-        src = resolve(term, i, seed, avoid=last) or last
+        src = _pexels_fetch(term, i + seed) or resolve(term, i, seed, avoid=last) or last
         if src: last = src
         dur = max(0.6, ends[i]-starts[i]); seg = os.path.join(WORK, f"s{i:02d}.mp4")
         if src:
