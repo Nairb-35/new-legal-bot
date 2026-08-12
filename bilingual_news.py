@@ -760,33 +760,38 @@ def render_and_send(chat_id, title, script, broll, reply_to=None):
     building and how long it's taking. Blocks a few minutes."""
     label = (title or "your video").strip()
     lab = _esc(label[:80])
-    mid = _send_get_id(chat_id,
-                       f"🎬 <b>Making AI video</b> for:\n“{lab}”\n\n⏳ 0:00 · usually 2–4 min…",
-                       reply_to)
-    stop = threading.Event()
-    t0 = time.time()
 
-    def ticker():
-        while not stop.wait(15):
-            m, s = divmod(int(time.time() - t0), 60)
-            _edit(chat_id, mid, f"🎬 <b>Making AI video</b> for:\n“{lab}”\n\n⏳ {m}:{s:02d} elapsed · rendering…")
-    th = threading.Thread(target=ticker, daemon=True)
-    th.start()
+    def bar(p):
+        f = max(0, min(10, int(round(p / 10))))
+        return "▓" * f + "░" * (10 - f)
+
+    mid = _send_get_id(chat_id,
+                       f"🎬 <b>Making AI video</b> for:\n“{lab}”\n\n{bar(0)}  0%\n<i>Starting…</i>",
+                       reply_to)
+    state = {"pct": -100, "t": 0.0}
+
+    def on_progress(pct, lbl):
+        # Throttle edits so we don't hit Telegram's rate limit: only when the
+        # bar jumps ≥4% AND ≥1.6s since the last edit (always send 100%).
+        now = time.time()
+        if pct >= 100 or (pct - state["pct"] >= 4 and now - state["t"] >= 1.6):
+            state["pct"] = pct
+            state["t"] = now
+            _edit(chat_id, mid, f"🎬 <b>Making AI video</b> for:\n“{lab}”\n\n{bar(pct)}  {pct}%\n<i>{_esc(lbl or 'Rendering')}…</i>")
+
     try:
+        _edit(chat_id, mid, f"🎬 <b>Making AI video</b> for:\n“{lab}”\n\n{bar(0)}  0%\n<i>Warming up the render engine…</i>")
         _ensure_video_deps()
         import video_maker
         out = os.path.join(os.getcwd(), "ai_short.mp4")
-        video_maker.render(title or "Malaysian Law", script, broll, out)
-        stop.set(); th.join(timeout=2)
-        m, s = divmod(int(time.time() - t0), 60)
-        _edit(chat_id, mid, f"✅ <b>Video ready</b> for “{lab}” — rendered in {m}:{s:02d}. Uploading… 📤")
+        video_maker.render(title or "Malaysian Law", script, broll, out, progress=on_progress)
+        _edit(chat_id, mid, f"✅ <b>Video ready</b> for “{lab}” — uploading… 📤")
         res = _send_video(chat_id, out,
                           caption=f"🎬 <b>{lab}</b>\nYour AI law short — ready to post! 😄",
                           reply_to=reply_to)
         if res is None or res.status_code != 200:
             _edit(chat_id, mid, f"⚠️ Rendered “{lab}” but upload failed (status {getattr(res, 'status_code', '?')}). File may be too large.")
     except Exception as e:
-        stop.set()
         import traceback
         traceback.print_exc()
         _edit(chat_id, mid, f"⚠️ Sorry, the video render failed for “{lab}”: {str(e)[:150]}")

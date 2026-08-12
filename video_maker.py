@@ -95,11 +95,17 @@ def _shadow(ch):
     cv = Image.composite(Image.new("RGBA", cv.size, (0,0,0,165)), cv, m)
     cv.alpha_composite(ch, (pad, pad)); return cv
 
-def render(title, script, broll_terms, out_path):
+def render(title, script, broll_terms, out_path, progress=None):
+    def rep(p, label=""):
+        if progress:
+            try: progress(int(p), label)
+            except Exception: pass
     script = (script or "").strip()
     if not script: raise ValueError("empty script")
+    rep(4, "Preparing")
     audio = os.path.join(WORK, "voice.mp3")
     sentz = _synth(script, audio)
+    rep(12, "Voiceover ready")
 
     sd = subprocess.run([FF, "-i", audio, "-af", "silencedetect=noise=-32dB:d=0.12", "-f", "null", "-"],
                         capture_output=True, text=True).stderr
@@ -109,9 +115,11 @@ def render(title, script, broll_terms, out_path):
            re.findall(r"silence_start:\s*([\d.]+)[\s\S]*?silence_end:\s*([\d.]+)", sd)]
     def speaking(t): return not any(a <= t <= b for a, b in sil)
 
+    rep(16, "Timing captions")
     caps = _caps(sentz)
     for i in range(len(caps)-1): caps[i][2] = caps[i+1][1]
     caps[-1][2] = AUD
+    rep(30, "Captions ready")
     def disp(t): return t.replace("{","").replace("}","").strip().strip(",.—– ").upper()
     def tt(x):
         h=int(x//3600); mn=int(x%3600//60); s=x%60; return f"{h:d}:{mn:02d}:{s:05.2f}"
@@ -130,10 +138,13 @@ def render(title, script, broll_terms, out_path):
     C, O = prep(Craw), prep(Oraw); HEAD_W, HEAD_H = C.size
     for f in os.listdir(WORK):
         if f.startswith("h") and f.endswith(".png"): os.remove(os.path.join(WORK, f))
-    for k in range(int(AUD*HFPS)+1):
+    nf = int(AUD*HFPS)+1
+    for k in range(nf):
         (O if (speaking(k/HFPS) and k % 2 == 0) else C).save(os.path.join(WORK, f"h{k:04d}.png"))
+        if k % 12 == 0: rep(30 + 34*k/max(1, nf), "Animating host")
     subprocess.run([FF, "-y", "-framerate", str(HFPS), "-i", "h%04d.png", "-c:v", "qtrle", "head.mov",
                     "-loglevel", "error"], cwd=WORK)
+    rep(66, "Host ready")
 
     starts = [0.0] + [sentz[i][1] for i in range(1, len(sentz))]
     ends = starts[1:] + [AUD]
@@ -153,13 +164,17 @@ def render(title, script, broll_terms, out_path):
         subprocess.run([FF, "-y", *inp, "-t", f"{dur:.3f}", "-vf", vf,
             "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", seg, "-loglevel", "error"])
         lines.append(f"file 's{i:02d}.mp4'")
+        rep(66 + 26*(i+1)/max(1, len(sentz)), "Building backgrounds")
     open(os.path.join(WORK, "list.txt"), "w").write("\n".join(lines))
     subprocess.run([FF, "-y", "-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", "bg.mp4",
                     "-loglevel", "error"], cwd=WORK)
+    rep(94, "Stitching")
 
     oy = 1920 - HEAD_H - 30
+    rep(96, "Adding captions & audio")
     subprocess.run([FF, "-y", "-i", "bg.mp4", "-i", os.path.join(WORK, "head.mov"), "-i", audio,
         "-filter_complex", f"[0:v][1:v]overlay=8:{oy}:shortest=1,ass=subs.ass[v]",
         "-map", "[v]", "-map", "2:a", "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "160k", "-shortest", out_path, "-loglevel", "error"], cwd=WORK)
+    rep(100, "Done")
     return out_path
