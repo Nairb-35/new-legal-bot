@@ -3,7 +3,9 @@ import requests
 import time
 import os
 import re
+import sys
 import json
+import subprocess
 from datetime import datetime, timezone, timedelta
 from deep_translator import GoogleTranslator
 
@@ -502,15 +504,18 @@ def send_news_message(title_en, title_bm, published_str, importance_stars, notio
         lines.append(f"⭐ <b>Importance:</b> {_esc(importance_stars)}")
 
     message = "\n".join(lines)[:3900]
-    reply_markup = {
-        "inline_keyboard": [
-            [
-                {"text": "🎓 Interview & Deep Analysis", "url": notion_url},
-                {"text": "🎬 Video Script", "url": video_url or notion_url},
-            ],
-            [{"text": "🔗 Baca Artikel / Read Article", "url": link}],
-        ]
-    }
+    kb = [
+        [
+            {"text": "🎓 Interview & Deep Analysis", "url": notion_url},
+            {"text": "🎬 Video Script", "url": video_url or notion_url},
+        ],
+    ]
+    vid_id = _page_id(video_url)
+    if vid_id:
+        # Tap → the bot renders the AI video and sends it back here (takes a few min).
+        kb.append([{"text": "🎥 Make AI Video (tap & wait)", "callback_data": f"v:{vid_id}"}])
+    kb.append([{"text": "🔗 Baca Artikel / Read Article", "url": link}])
+    reply_markup = {"inline_keyboard": kb}
     res = tg("sendMessage", {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
@@ -651,8 +656,119 @@ def _send(chat_id, text, buttons=None):
     tg("sendMessage", payload)
 
 
+# ---------------------------------------------------------------------------
+# AI video maker — tap "🎥 Make AI Video" and the bot renders + sends the short.
+# Heavy deps are installed lazily (only when a video is actually requested), so
+# normal news runs stay fast. Backgrounds come from the bundled lib/ clips.
+# ---------------------------------------------------------------------------
+def _page_id(notion_url):
+    """Extract the 32-char Notion page id from a page URL (or None)."""
+    if not notion_url:
+        return None
+    m = re.search(r"([0-9a-fA-F]{32})", notion_url.replace("-", ""))
+    return m.group(1) if m else None
+
+
+def _fetch_render_block(page_id):
+    """Read the ===LAWVID=== render payload from a video page's code block."""
+    if not NOTION_TOKEN or not page_id:
+        return None
+    url = f"https://api.notion.com/v1/blocks/{page_id}/children?page_size=100"
+    try:
+        res = requests.get(url, headers=NOTION_HEADERS, timeout=30)
+        if res.status_code != 200:
+            print("Notion fetch blocks error:", res.status_code, res.text[:200])
+            return None
+        for blk in res.json().get("results", []):
+            if blk.get("type") == "code":
+                rt = blk["code"].get("rich_text", [])
+                txt = "".join(x.get("plain_text", "") for x in rt)
+                if "===LAWVID===" in txt or "SCRIPT:" in txt.upper():
+                    return txt
+    except Exception as e:
+        print("Notion fetch exception:", e)
+    return None
+
+
+def _parse_render_block(txt):
+    """Parse TITLE / SCRIPT / BROLL out of the render payload."""
+    title, script, broll = "", txt, []
+    if "SCRIPT:" in txt.upper():
+        mt = re.search(r"TITLE:\s*(.+)", txt, re.I)
+        if mt:
+            title = mt.group(1).strip()
+        ms = re.search(r"SCRIPT:\s*(.*?)(?:\n\s*BROLL:|\Z)", txt, re.I | re.S)
+        if ms:
+            script = ms.group(1).strip()
+        mb = re.search(r"BROLL:\s*(.*?)(?:\n\s*={2,}|\Z)", txt, re.I | re.S)
+        if mb:
+            broll = [b.strip(" -•|\t") for b in mb.group(1).replace("\n", "|").split("|") if b.strip(" -•|\t")]
+    script = re.sub(r"={3,}[A-Z]*={0,}", "", script).strip()
+    return title, script, broll
+
+
+def _ensure_video_deps():
+    """Install the render deps on the runner the first time a video is requested."""
+    import importlib
+    for mod, pkg in [("numpy", "numpy"), ("PIL", "pillow"),
+                     ("edge_tts", "edge-tts"), ("imageio_ffmpeg", "imageio-ffmpeg")]:
+        try:
+            importlib.import_module(mod)
+        except ImportError:
+            print(f"Installing {pkg} …")
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", pkg], check=True)
+
+
+def _send_video(chat_id, path, caption=""):
+    if not TELEGRAM_BOT_TOKEN:
+        return None
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
+    try:
+        with open(path, "rb") as f:
+            return requests.post(url, data={"chat_id": chat_id, "caption": caption,
+                                            "supports_streaming": "true"},
+                                 files={"video": f}, timeout=600)
+    except Exception as e:
+        print("sendVideo error:", e)
+        return None
+
+
+def render_and_send(chat_id, title, script, broll):
+    """Render the video from a script and send it to the chat. Blocks a few min."""
+    _send(chat_id, "🎬 <b>Making your AI video…</b>\nVoice, captions, backgrounds and your host — this takes a few minutes. I'll drop it here when it's ready. ⏳")
+    try:
+        _ensure_video_deps()
+        import video_maker
+        out = os.path.join(os.getcwd(), "ai_short.mp4")
+        video_maker.render(title or "Malaysian Law", script, broll, out)
+        res = _send_video(chat_id, out, caption="🎬 Your AI law short — ready to post! Follow-worthy? 😄")
+        if res is None or res.status_code != 200:
+            _send(chat_id, f"⚠️ Rendered but upload failed (status {getattr(res, 'status_code', '?')}). File may be too large.")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        _send(chat_id, f"⚠️ Sorry, the video render failed: {str(e)[:200]}")
+
+
 def handle_update(u):
     """Handle ONE Telegram update (used by both the cron poller and the always-on bot)."""
+    # Button taps (callback queries) — e.g. "🎥 Make AI Video".
+    cq = u.get("callback_query")
+    if cq:
+        data = cq.get("data") or ""
+        cq_chat = (cq.get("message") or {}).get("chat", {}).get("id")
+        tg("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "🎬 Starting your video…"})
+        if data.startswith("v:") and cq_chat is not None:
+            payload = _fetch_render_block(data[2:])
+            if not payload:
+                _send(cq_chat, "⚠️ Couldn't find the render data on that page (older posts don't have it yet). Try a fresh news post.")
+                return
+            title, script, broll = _parse_render_block(payload)
+            if script:
+                render_and_send(cq_chat, title, script, broll)
+            else:
+                _send(cq_chat, "⚠️ No script found to render on that page.")
+        return
     msg = u.get("message") or u.get("channel_post")
     if not msg:
         return
@@ -667,6 +783,16 @@ def handle_update(u):
     print(f"Received update from chat_id={chat_id} (type={chat_type}) text={text[:40]!r}")
 
     low = text.lower()
+    if low.startswith("/vtest"):
+        # Render a canned short end-to-end — tests the whole video pipeline.
+        render_and_send(
+            chat_id, "Test",
+            "Here's a quick test of the AI video maker. It builds the voice, the captions, "
+            "and the cartoon host on real backgrounds. If you can see this, everything works. "
+            "Follow for more Malaysian law, made simple.",
+            ["courtroom gavel", "parliament building", "law book pages", "kuala lumpur skyline"])
+        return
+
     if low.startswith("/id"):
         _send(chat_id, f"🆔 This chat's ID is:\n<code>{chat_id}</code>\n\nSet this as the bot's TELEGRAM_CHAT_ID secret so news posts here.")
         return
