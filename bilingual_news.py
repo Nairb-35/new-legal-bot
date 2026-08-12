@@ -19,6 +19,8 @@ AI_ORIGIN = "https://lawgpt-app.vercel.app"
 # Matches GitHub Secret names:
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAMBOTTOKEN")
 NOTION_TOKEN = os.getenv("NOTIONTOKEN")
+BOT_REPO = "Nairb-35/new-legal-bot"
+BOT_GH_TOKEN = os.getenv("BOT_GH_TOKEN")  # PAT (Actions secret): lets a dispatched run clear its job file
 
 TELEGRAM_CHAT_ID = "-1004348673663"
 # Correct 32-char database id (the old one was missing a character, so every
@@ -754,10 +756,29 @@ def _send_video(chat_id, path, caption="", reply_to=None):
         return None
 
 
-def render_and_send(chat_id, title, script, broll, reply_to=None):
-    """Render the video and send it to the chat, threaded under the news post
-    (reply_to) with a live elapsed-time ticker so it's clear which video is
-    building and how long it's taking. Blocks a few minutes."""
+class _Cancelled(Exception):
+    pass
+
+
+def _is_cancelled(cancel_id):
+    """The webhook writes cancel_<id>.flag to the repo when Cancel is tapped.
+    Public repo → unauthenticated read works, so no token is needed here."""
+    if not cancel_id:
+        return False
+    try:
+        r = requests.get(
+            f"https://api.github.com/repos/{BOT_REPO}/contents/cancel_{cancel_id}.flag?ref=main",
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "lawbot"}, timeout=8)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def render_and_send(chat_id, title, script, broll, reply_to=None, mid=None, cancel_id=None):
+    """Render the video and send it, editing a live % progress message. If `mid`
+    is given (a status message the webhook already posted) we edit that one so it
+    updates instantly; otherwise we create it. If `cancel_id` is given we abort
+    when its cancel flag appears. Blocks a few minutes."""
     label = (title or "your video").strip()
     lab = _esc(label[:80])
 
@@ -765,14 +786,17 @@ def render_and_send(chat_id, title, script, broll, reply_to=None):
         f = max(0, min(10, int(round(p / 10))))
         return "▓" * f + "░" * (10 - f)
 
-    mid = _send_get_id(chat_id,
-                       f"🎬 <b>Making AI video</b> for:\n“{lab}”\n\n{bar(0)}  0%\n<i>Starting…</i>",
-                       reply_to)
+    if mid is None:
+        mid = _send_get_id(chat_id,
+                           f"🎬 <b>Making AI video</b> for:\n“{lab}”\n\n{bar(0)}  0%\n<i>Starting…</i>",
+                           reply_to)
     state = {"pct": -100, "t": 0.0}
 
     def on_progress(pct, lbl):
-        # Throttle edits so we don't hit Telegram's rate limit: only when the
-        # bar jumps ≥4% AND ≥1.6s since the last edit (always send 100%).
+        if _is_cancelled(cancel_id):
+            raise _Cancelled()
+        # Throttle edits to avoid Telegram rate limits: only when the bar jumps
+        # ≥4% AND ≥1.6s since the last edit (always send 100%).
         now = time.time()
         if pct >= 100 or (pct - state["pct"] >= 4 and now - state["t"] >= 1.6):
             state["pct"] = pct
@@ -791,10 +815,68 @@ def render_and_send(chat_id, title, script, broll, reply_to=None):
                           reply_to=reply_to)
         if res is None or res.status_code != 200:
             _edit(chat_id, mid, f"⚠️ Rendered “{lab}” but upload failed (status {getattr(res, 'status_code', '?')}). File may be too large.")
+    except _Cancelled:
+        _edit(chat_id, mid, f"❌ <b>Cancelled.</b> No video made.")
     except Exception as e:
         import traceback
         traceback.print_exc()
         _edit(chat_id, mid, f"⚠️ Sorry, the video render failed for “{lab}”: {str(e)[:150]}")
+
+
+# ---- webhook job queue: the Vercel webhook writes job.json + triggers a run ----
+def _delete_repo_file(path):
+    """Remove a file from the repo so a job never re-runs on the next cron. Uses the PAT."""
+    if not BOT_GH_TOKEN:
+        return
+    try:
+        url = f"https://api.github.com/repos/{BOT_REPO}/contents/{path}"
+        h = {"Authorization": f"Bearer {BOT_GH_TOKEN}", "Accept": "application/vnd.github+json", "User-Agent": "lawbot"}
+        g = requests.get(url + "?ref=main", headers=h, timeout=15)
+        if g.status_code != 200:
+            return
+        requests.request("DELETE", url, headers=h, timeout=15,
+                         json={"message": f"clear {path}", "sha": g.json().get("sha"), "branch": "main"})
+    except Exception as e:
+        print("delete repo file error:", e)
+
+
+def run_pending_job():
+    """If the webhook queued a job (job.json in the checkout), run it and clear it.
+    Returns True if a job was handled (so the caller skips the normal news run)."""
+    if not os.path.exists("job.json"):
+        return False
+    try:
+        job = json.load(open("job.json", encoding="utf-8"))
+    except Exception:
+        _delete_repo_file("job.json"); return True
+    _delete_repo_file("job.json")   # clear first so it can never double-run
+    t = job.get("type"); chat = job.get("chat_id")
+    pmid = job.get("progress_msg_id"); reply = job.get("reply_to")
+    try:
+        if t == "render":
+            payload = _fetch_render_block(job.get("page_id"))
+            if not payload:
+                _edit(chat, pmid, "⚠️ Couldn't find the render data on that page."); return True
+            title, script, broll = _parse_render_block(payload)
+            if not script:
+                _edit(chat, pmid, "⚠️ No script found to render."); return True
+            render_and_send(chat, title, script, broll, reply_to=reply, mid=pmid, cancel_id=pmid)
+        elif t == "vtest":
+            render_and_send(chat, "Test video",
+                            "Here's a quick test of the AI video maker. It builds the voice, the captions, "
+                            "and the cartoon host on real backgrounds. If you can see this, everything works. "
+                            "Follow for more Malaysian law, made simple.",
+                            ["courtroom gavel", "parliament building", "law book pages", "kuala lumpur skyline"],
+                            reply_to=reply, mid=pmid, cancel_id=pmid)
+        elif t == "news":
+            posted = fetch_and_post_news(minutes_window=1440)
+            if chat and not posted:
+                _send(chat, "📭 <b>No news yet!</b> Nothing new since the last update — I'll keep watching. ⚖️")
+    except Exception as e:
+        print("run_pending_job error:", e)
+        if chat and pmid:
+            _edit(chat, pmid, f"⚠️ Job failed: {str(e)[:150]}")
+    return True
 
 
 def handle_update(u):
@@ -921,5 +1003,8 @@ def set_commands():
 
 if __name__ == "__main__":
     set_commands()        # register the /search command menu (idempotent)
-    handle_commands()     # answer any date-search requests waiting since last run
-    fetch_and_post_news(minutes_window=1440)   # post fresh news (no repeats)
+    if run_pending_job():
+        pass              # a webhook-queued job (video/news) ran this invocation
+    else:
+        handle_commands()     # pre-webhook fallback (harmless 409 once the webhook is live)
+        fetch_and_post_news(minutes_window=1440)   # post fresh news (no repeats)
