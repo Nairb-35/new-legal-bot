@@ -108,6 +108,28 @@ async function startVideo(chat, replyTo, pageId, isVtest) {
   await ghDispatch();
 }
 
+async function startExplain(chat, replyTo, topic) {
+  const cfg = await ghGetJson('explaincfg.json');     // set by /setupexplainers
+  const target = (cfg && cfg.chat_id) || chat;
+  const thread = (cfg && cfg.thread_id) || undefined;
+  const sameChat = String(target) === String(chat);
+  const reply = (thread || !sameChat) ? undefined : replyTo;
+  const msg = { chat_id: target, parse_mode: 'HTML',
+    text: '📚 <b>Making explainer:</b> ' + topic.slice(0, 60) + '\n\n░░░░░░░░░░  0%\n<i>Writing an accurate script…</i>' };
+  if (thread) msg.message_thread_id = thread;
+  else if (reply) msg.reply_to_message_id = reply;
+  const sent = await tg('sendMessage', msg);
+  const pmid = sent.result && sent.result.message_id;
+  if (pmid) {
+    await tg('editMessageReplyMarkup', { chat_id: target, message_id: pmid,
+      reply_markup: { inline_keyboard: [[{ text: '✖ Cancel', callback_data: 'x:' + pmid }]] } });
+  }
+  const ts = Math.floor(Date.now() / 1000);
+  await ghPut('job.json', { type: 'explain', topic, chat_id: target, message_thread_id: thread || null,
+    progress_msg_id: pmid, reply_to: reply || null, ts }, 'queue explainer job');
+  await ghDispatch();
+}
+
 function readRaw(req) {
   return new Promise((resolve) => { let d = ''; req.on('data', (c) => (d += c)); req.on('end', () => resolve(d)); });
 }
@@ -180,6 +202,24 @@ module.exports = async (req, res) => {
         } else {
           await ghPut('videocfg.json', { chat_id: chat, thread_id: tid || null }, 'set video destination');
           await tg('sendMessage', { chat_id: chat, message_thread_id: tid, text: '✅ Done — AI videos will now be posted ' + (tid ? 'in THIS topic' : 'in THIS chat') + '.\nTap 🎥 Make AI Video on a news post to try it.' });
+        }
+      } else if (low.startsWith('/setupexplainers')) {
+        const r = await tg('createForumTopic', { chat_id: chat, name: '📚 Law Explainers' });
+        if (r && r.ok && r.result && r.result.message_thread_id) {
+          const tid = r.result.message_thread_id;
+          await ghPut('explaincfg.json', { chat_id: chat, thread_id: tid }, 'set explainer destination');
+          await tg('sendMessage', { chat_id: chat, message_thread_id: tid, text: '✅ Created this "📚 Law Explainers" topic.\nSend  /explain <topic>  (e.g. /explain thin skull rule) and the explainer video appears here.' });
+        } else {
+          const desc = (r && r.description) || 'unknown error';
+          await tg('sendMessage', { chat_id: chat, text: '⚠️ Couldn\'t create the topic: ' + desc + '\nMake sure Topics is ON and I am an admin with Manage Topics, then retry /setupexplainers.' });
+        }
+      } else if (low.startsWith('/explain')) {
+        const sp = text.indexOf(' ');
+        const topic = sp > 0 ? text.slice(sp + 1).trim() : '';
+        if (!topic) {
+          await tg('sendMessage', { chat_id: chat, message_thread_id: msg.message_thread_id, text: 'Add a topic, e.g.  /explain thin skull rule' });
+        } else {
+          await startExplain(chat, msg.message_id, topic);
         }
       } else if (low.startsWith('/news')) {
         await tg('sendMessage', { chat_id: chat, text: '🔍 Checking for the latest legal news…' });

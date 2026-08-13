@@ -209,6 +209,48 @@ def ai_lens(title, summary):
         return None
 
 
+def ai_explainer(topic):
+    """Generate an ACCURATE, grounded ~130-150 word explainer video script + a
+    per-sentence b-roll term list for a Malaysian-law topic. Returns
+    {title, script, broll} or None. Accuracy is enforced hard in the prompt."""
+    try:
+        body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 1600,
+            "system": (
+                "You are a Malaysian law lecturer scripting a punchy 55-60 second vertical short that TEACHES one legal topic. "
+                "ACCURACY IS PARAMOUNT — a wrong statement ruins credibility. Rules: ground everything in REAL, well-established "
+                "law; name the ACTUAL statute or constitutional Article that governs it in Malaysia when one applies (e.g. Penal "
+                "Code, Contracts Act 1950, Federal Constitution Art X) and name it precisely; if the point is a common-law "
+                "doctrine (e.g. the thin-skull rule, caveat emptor) say so plainly. NEVER invent case names, fake section "
+                "numbers, or doctrines that may not exist — if you are not sure of a citation, state the principle in plain terms "
+                "WITHOUT a fake citation. Do not overstate certainty. Keep it engaging and correct.\n"
+                "Output ONLY valid JSON (no markdown fences) with EXACTLY these keys: "
+                "title (string, <=60 chars, catchy), "
+                "script (string, WORD-FOR-WORD spoken narration ~130-150 words that reads naturally out loud in a punchy creator "
+                "voice, opens with a strong hook, teaches the topic as a clear mini-story or step-by-step explanation, and ends "
+                "with exactly: 'Follow for more Malaysian law, made simple.'), "
+                "broll (array of 10-16 SHORT, LITERAL stock-footage search phrases, 2-4 plain words each, ONE per sentence of the "
+                "script in order, each a concrete filmable noun a free stock site would have, e.g. 'courtroom gavel','handcuffs "
+                "closeup','person signing document','hospital hallway','kuala lumpur skyline'; universal nouns only, no proper names)."
+            ),
+            "messages": [{"role": "user", "content": f"Teach this Malaysian-law topic accurately in the short: {topic}"}],
+        }
+        res = requests.post(AI_ENDPOINT, json=body,
+                            headers={"Content-Type": "application/json", "Origin": AI_ORIGIN}, timeout=60)
+        if res.status_code != 200:
+            print("ai_explainer error:", res.status_code, res.text[:200])
+            return None
+        text = "".join(b.get("text", "") for b in res.json().get("content", []) if b.get("type") == "text").strip()
+        a, b = text.find("{"), text.rfind("}")
+        if a < 0 or b <= a:
+            return None
+        return json.loads(text[a:b + 1])
+    except Exception as ex:
+        print("ai_explainer exception:", ex)
+        return None
+
+
 # ---- tiny Notion block builders ----
 def _rt(t):
     return {"rich_text": [{"type": "text", "text": {"content": str(t)[:1900]}}]}
@@ -871,6 +913,15 @@ def run_pending_job():
                             "and the cartoon host on real backgrounds. If you can see this, everything works. "
                             "Follow for more Malaysian law, made simple.",
                             ["courtroom gavel", "parliament building", "law book pages", "kuala lumpur skyline"],
+                            reply_to=reply, mid=pmid, cancel_id=pmid, thread=thread)
+        elif t == "explain":
+            topic = job.get("topic") or "Malaysian law"
+            _edit(chat, pmid, f"📚 <b>Making explainer:</b> {topic[:60]}\n\n░░░░░░░░░░  0%\n<i>Writing an accurate, grounded script…</i>")
+            data = ai_explainer(topic)
+            if not data or not data.get("script"):
+                _edit(chat, pmid, f"⚠️ Couldn't write an accurate script for “{topic[:60]}”. Try rephrasing the topic.")
+                return True
+            render_and_send(chat, data.get("title") or topic, data["script"], data.get("broll") or [],
                             reply_to=reply, mid=pmid, cancel_id=pmid, thread=thread)
         elif t == "news":
             posted = fetch_and_post_news(minutes_window=1440)
