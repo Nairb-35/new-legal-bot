@@ -46,20 +46,30 @@ async function ghDispatch() {
 // De-duplicate Telegram webhook retries: Telegram re-sends the SAME update_id if
 // we don't reply fast enough, which was causing two renders per tap. We remember
 // recently-handled update_ids in seen.json and skip repeats.
-async function alreadyHandled(uid) {
-  if (uid == null) return false;
+async function alreadyHandled(key) {
+  // De-dupe by a semantic key (same button + action) within a time window, with
+  // optimistic-concurrency retry: the GitHub PUT carries the file sha, so if two
+  // near-simultaneous calls race, the loser gets a 409, re-reads, and sees the
+  // winner already claimed the key -> it skips. Stops ANY double-fire per tap.
+  if (!key) return false;
   const url = `https://api.github.com/repos/${REPO}/contents/seen.json`;
-  let sha, list = [];
-  try {
-    const g = await fetch(url + '?ref=main', { headers: ghHeaders });
-    if (g.ok) { const j = await g.json(); sha = j.sha; list = JSON.parse(Buffer.from(j.content, 'base64').toString('utf-8')); }
-  } catch (e) {}
-  if (!Array.isArray(list)) list = [];
-  if (list.includes(uid)) return true;         // this update was already handled — skip
-  list.push(uid); if (list.length > 50) list = list.slice(-50);
-  const body = { message: 'seen', content: Buffer.from(JSON.stringify(list)).toString('base64'), branch: 'main' };
-  if (sha) body.sha = sha;
-  try { await fetch(url, { method: 'PUT', headers: ghHeaders, body: JSON.stringify(body) }); } catch (e) {}
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let sha, list = [];
+    try {
+      const g = await fetch(url + '?ref=main', { headers: ghHeaders });
+      if (g.ok) { const j = await g.json(); sha = j.sha; list = JSON.parse(Buffer.from(j.content, 'base64').toString('utf-8')); }
+    } catch (e) {}
+    const now = Date.now();
+    list = (Array.isArray(list) ? list : []).filter((e) => Array.isArray(e) && (now - e[1]) < 600000);
+    if (list.some((e) => e[0] === key && (now - e[1]) < 180000)) return true;   // same tap within 3 min → skip
+    list.push([key, now]); if (list.length > 60) list = list.slice(-60);
+    const body = { message: 'seen', content: Buffer.from(JSON.stringify(list)).toString('base64'), branch: 'main' };
+    if (sha) body.sha = sha;
+    let put;
+    try { put = await fetch(url, { method: 'PUT', headers: ghHeaders, body: JSON.stringify(body) }); } catch (e) {}
+    if (put && put.ok) return false;    // we claimed the key -> proceed
+    // otherwise a concurrent write won (409) — loop and re-check; likely we'll now see the key
+  }
   return false;
 }
 
@@ -109,8 +119,12 @@ module.exports = async (req, res) => {
   let u = req.body;
   if (!u || typeof u !== 'object') { try { u = JSON.parse(await readRaw(req)); } catch (e) { u = {}; } }
   try {
-    // Ignore Telegram's retry of an update we already processed (was causing 2 videos per tap).
-    if (await alreadyHandled(u.update_id)) { res.status(200).send('ok'); return; }
+    // De-dupe one tap that fires twice: key by (button message + action), or by
+    // (chat + command text) for messages, within a short window.
+    const dkey = u.callback_query
+      ? 'cb:' + ((u.callback_query.message && u.callback_query.message.chat && u.callback_query.message.chat.id) || '') + ':' + ((u.callback_query.message && u.callback_query.message.message_id) || '') + ':' + (u.callback_query.data || '')
+      : (u.message ? 'msg:' + ((u.message.chat && u.message.chat.id) || '') + ':' + ((u.message.text || '').trim().toLowerCase()) : null);
+    if (await alreadyHandled(dkey)) { res.status(200).send('ok'); return; }
     const cq = u.callback_query;
     if (cq) {
       const data = cq.data || '';
