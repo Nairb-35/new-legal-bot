@@ -741,12 +741,14 @@ def _edit(chat_id, message_id, text):
                            "parse_mode": "HTML", "disable_web_page_preview": True})
 
 
-def _send_video(chat_id, path, caption="", reply_to=None):
+def _send_video(chat_id, path, caption="", reply_to=None, message_thread_id=None):
     if not TELEGRAM_BOT_TOKEN:
         return None
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
     data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML", "supports_streaming": "true"}
-    if reply_to:
+    if message_thread_id:
+        data["message_thread_id"] = message_thread_id
+    elif reply_to:
         data["reply_to_message_id"] = reply_to
     try:
         with open(path, "rb") as f:
@@ -774,7 +776,7 @@ def _is_cancelled(cancel_id):
         return False
 
 
-def render_and_send(chat_id, title, script, broll, reply_to=None, mid=None, cancel_id=None):
+def render_and_send(chat_id, title, script, broll, reply_to=None, mid=None, cancel_id=None, thread=None):
     """Render the video and send it, editing a live % progress message. If `mid`
     is given (a status message the webhook already posted) we edit that one so it
     updates instantly; otherwise we create it. If `cancel_id` is given we abort
@@ -812,7 +814,7 @@ def render_and_send(chat_id, title, script, broll, reply_to=None, mid=None, canc
         _edit(chat_id, mid, f"✅ <b>Video ready</b> for “{lab}” — uploading… 📤")
         res = _send_video(chat_id, out,
                           caption=f"🎬 <b>{lab}</b>\nYour AI law short — ready to post! 😄",
-                          reply_to=reply_to)
+                          reply_to=reply_to, message_thread_id=thread)
         if res is None or res.status_code != 200:
             _edit(chat_id, mid, f"⚠️ Rendered “{lab}” but upload failed (status {getattr(res, 'status_code', '?')}). File may be too large.")
     except _Cancelled:
@@ -853,6 +855,7 @@ def run_pending_job():
     _delete_repo_file("job.json")   # clear first so it can never double-run
     t = job.get("type"); chat = job.get("chat_id")
     pmid = job.get("progress_msg_id"); reply = job.get("reply_to")
+    thread = job.get("message_thread_id")
     try:
         if t == "render":
             payload = _fetch_render_block(job.get("page_id"))
@@ -861,14 +864,14 @@ def run_pending_job():
             title, script, broll = _parse_render_block(payload)
             if not script:
                 _edit(chat, pmid, "⚠️ No script found to render."); return True
-            render_and_send(chat, title, script, broll, reply_to=reply, mid=pmid, cancel_id=pmid)
+            render_and_send(chat, title, script, broll, reply_to=reply, mid=pmid, cancel_id=pmid, thread=thread)
         elif t == "vtest":
             render_and_send(chat, "Test video",
                             "Here's a quick test of the AI video maker. It builds the voice, the captions, "
                             "and the cartoon host on real backgrounds. If you can see this, everything works. "
                             "Follow for more Malaysian law, made simple.",
                             ["courtroom gavel", "parliament building", "law book pages", "kuala lumpur skyline"],
-                            reply_to=reply, mid=pmid, cancel_id=pmid)
+                            reply_to=reply, mid=pmid, cancel_id=pmid, thread=thread)
         elif t == "news":
             posted = fetch_and_post_news(minutes_window=1440)
             if chat and not posted:

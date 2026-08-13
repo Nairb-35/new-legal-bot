@@ -17,6 +17,7 @@ const TG = process.env.TELEGRAMBOTTOKEN;
 const GH = process.env.BOT_GH_TOKEN;
 const REPO = process.env.BOT_REPO || 'Nairb-35/new-legal-bot';
 const VIDEO_CHAT = process.env.VIDEO_CHAT_ID;   // if set, finished videos go to THIS chat, not the news group
+const VIDEO_TOPIC = process.env.VIDEO_TOPIC_ID; // if set, videos go to this forum topic (thread) within the chat
 
 async function tg(method, body) {
   const r = await fetch(`https://api.telegram.org/bot${TG}/${method}`, {
@@ -77,11 +78,13 @@ async function alreadyHandled(key) {
 const PROG0 = '🎬 <b>Making AI video…</b>\n\n░░░░░░░░░░  0%\n<i>Queued — starting…</i>';
 
 async function startVideo(chat, replyTo, pageId, isVtest) {
-  const target = VIDEO_CHAT || chat;               // dedicated videos chat if configured, else the group
-  const reply = VIDEO_CHAT ? undefined : replyTo;  // can't reply-thread across chats
-  const sent = await tg('sendMessage', {
-    chat_id: target, text: PROG0, parse_mode: 'HTML', reply_to_message_id: reply,
-  });
+  const target = VIDEO_CHAT || chat;                 // dedicated videos chat if configured, else the group
+  const thread = VIDEO_TOPIC ? Number(VIDEO_TOPIC) : undefined;   // forum topic within the chat
+  const reply = (VIDEO_CHAT || thread) ? undefined : replyTo;     // topic/cross-chat replaces reply-threading
+  const msg = { chat_id: target, text: PROG0, parse_mode: 'HTML' };
+  if (thread) msg.message_thread_id = thread;
+  else if (reply) msg.reply_to_message_id = reply;
+  const sent = await tg('sendMessage', msg);
   const pmid = sent.result && sent.result.message_id;
   if (pmid) {
     await tg('editMessageReplyMarkup', {
@@ -90,9 +93,8 @@ async function startVideo(chat, replyTo, pageId, isVtest) {
     });
   }
   const ts = Math.floor(Date.now() / 1000);
-  const job = isVtest
-    ? { type: 'vtest', chat_id: target, progress_msg_id: pmid, reply_to: reply || null, ts }
-    : { type: 'render', page_id: pageId, chat_id: target, progress_msg_id: pmid, reply_to: reply || null, ts };
+  const base = { chat_id: target, message_thread_id: thread || null, progress_msg_id: pmid, reply_to: reply || null, ts };
+  const job = isVtest ? { type: 'vtest', ...base } : { type: 'render', page_id: pageId, ...base };
   await ghPut('job.json', job, 'queue video job');
   await ghDispatch();
 }
@@ -157,7 +159,11 @@ module.exports = async (req, res) => {
       } else if (low.startsWith('/help') || low.startsWith('/start')) {
         await tg('sendMessage', { chat_id: chat, text: '⚖️ Legal News Bot\n/news — latest news now\n/vtest — test the AI video maker' });
       } else if (low.startsWith('/id')) {
-        await tg('sendMessage', { chat_id: chat, text: '🆔 ' + chat });
+        const tid = msg.message_thread_id;
+        await tg('sendMessage', {
+          chat_id: chat, message_thread_id: tid,
+          text: '🆔 chat: ' + chat + (tid ? '\n📌 topic: ' + tid : '\n(no topic — send /id inside the Videos topic)'),
+        });
       }
     }
     res.status(200).send('ok');
