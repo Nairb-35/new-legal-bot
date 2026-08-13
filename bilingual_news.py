@@ -848,8 +848,8 @@ def run_pending_job():
         job = json.load(open("job.json", encoding="utf-8"))
     except Exception:
         _delete_repo_file("job.json"); return True
-    if job.get("ts") and (time.time() - job["ts"]) > 1200:
-        _delete_repo_file("job.json"); return True   # stale (>20 min) — don't re-render
+    if job.get("ts") and (time.time() - job["ts"]) > 300:
+        _delete_repo_file("job.json"); return True   # stale (>5 min) — don't re-render a lingering job
     _delete_repo_file("job.json")   # clear first so it can never double-run
     t = job.get("type"); chat = job.get("chat_id")
     pmid = job.get("progress_msg_id"); reply = job.get("reply_to")
