@@ -44,6 +44,13 @@ async function ghDispatch() {
     method: 'POST', headers: ghHeaders, body: JSON.stringify({ ref: 'main' }),
   });
 }
+async function ghGetJson(path) {
+  try {
+    const g = await fetch(`https://api.github.com/repos/${REPO}/contents/${path}?ref=main`, { headers: ghHeaders });
+    if (g.ok) { const j = await g.json(); return JSON.parse(Buffer.from(j.content, 'base64').toString('utf-8')); }
+  } catch (e) {}
+  return null;
+}
 
 // De-duplicate Telegram webhook retries: Telegram re-sends the SAME update_id if
 // we don't reply fast enough, which was causing two renders per tap. We remember
@@ -78,9 +85,11 @@ async function alreadyHandled(key) {
 const PROG0 = '🎬 <b>Making AI video…</b>\n\n░░░░░░░░░░  0%\n<i>Queued — starting…</i>';
 
 async function startVideo(chat, replyTo, pageId, isVtest) {
-  const target = VIDEO_CHAT || chat;                 // dedicated videos chat if configured, else the group
-  const thread = VIDEO_TOPIC ? Number(VIDEO_TOPIC) : undefined;   // forum topic within the chat
-  const reply = (VIDEO_CHAT || thread) ? undefined : replyTo;     // topic/cross-chat replaces reply-threading
+  const cfg = await ghGetJson('videocfg.json');      // set by /setvideos in the chat/topic you want
+  const target = (cfg && cfg.chat_id) || VIDEO_CHAT || chat;
+  const thread = (cfg && cfg.thread_id) || (VIDEO_TOPIC ? Number(VIDEO_TOPIC) : undefined);
+  const sameChat = String(target) === String(chat);
+  const reply = (thread || !sameChat) ? undefined : replyTo;     // topic/cross-chat replaces reply-threading
   const msg = { chat_id: target, text: PROG0, parse_mode: 'HTML' };
   if (thread) msg.message_thread_id = thread;
   else if (reply) msg.reply_to_message_id = reply;
@@ -152,6 +161,15 @@ module.exports = async (req, res) => {
       const low = text.toLowerCase();
       if (low.startsWith('/vtest')) {
         await startVideo(chat, msg.message_id, null, true);
+      } else if (low.startsWith('/setvideos')) {
+        const tid = msg.message_thread_id;
+        if (low.includes('off') || low.includes('reset')) {
+          await ghPut('videocfg.json', {}, 'clear video destination');
+          await tg('sendMessage', { chat_id: chat, message_thread_id: tid, text: '↩️ AI videos will post back in the news group.' });
+        } else {
+          await ghPut('videocfg.json', { chat_id: chat, thread_id: tid || null }, 'set video destination');
+          await tg('sendMessage', { chat_id: chat, message_thread_id: tid, text: '✅ Done — AI videos will now be posted ' + (tid ? 'in THIS topic' : 'in THIS chat') + '.\nTap 🎥 Make AI Video on a news post to try it.' });
+        }
       } else if (low.startsWith('/news')) {
         await tg('sendMessage', { chat_id: chat, text: '🔍 Checking for the latest legal news…' });
         await ghPut('job.json', { type: 'news', chat_id: chat, ts: Math.floor(Date.now() / 1000) }, 'news job');
