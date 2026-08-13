@@ -161,6 +161,17 @@ module.exports = async (req, res) => {
       const low = text.toLowerCase();
       if (low.startsWith('/vtest')) {
         await startVideo(chat, msg.message_id, null, true);
+      } else if (low.startsWith('/setupvideos')) {
+        // Bot creates its own "AI Videos" forum topic and routes videos there.
+        const r = await tg('createForumTopic', { chat_id: chat, name: '🎬 AI Videos' });
+        if (r && r.ok && r.result && r.result.message_thread_id) {
+          const tid = r.result.message_thread_id;
+          await ghPut('videocfg.json', { chat_id: chat, thread_id: tid }, 'set video destination (auto topic)');
+          await tg('sendMessage', { chat_id: chat, message_thread_id: tid, text: '✅ Created this "🎬 AI Videos" topic — your AI videos will now be posted here. Tap 🎥 Make AI Video on any news post to try it.' });
+        } else {
+          const desc = (r && r.description) || 'unknown error';
+          await tg('sendMessage', { chat_id: chat, text: '⚠️ Couldn\'t create the topic: ' + desc + '\n\nTwo things must be true first:\n1) This group has *Topics* turned ON (group → Edit → Topics).\n2) I am an *admin* here with the *Manage Topics* permission.\n\nFix those, then send /setupvideos again.', parse_mode: 'Markdown' });
+        }
       } else if (low.startsWith('/setvideos')) {
         const tid = msg.message_thread_id;
         if (low.includes('off') || low.includes('reset')) {
