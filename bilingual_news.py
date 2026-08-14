@@ -804,18 +804,47 @@ class _Cancelled(Exception):
     pass
 
 
-def _is_cancelled(cancel_id):
-    """The webhook writes cancel_<id>.flag to the repo when Cancel is tapped.
-    Public repo → unauthenticated read works, so no token is needed here."""
-    if not cancel_id:
-        return False
+_GH_TOK = None
+_GH_TOK_READ = False
+def _gh_token():
+    """Pull the token actions/checkout persisted in git config, so flag checks are
+    AUTHENTICATED (5000/hr) rather than unauthenticated (60/hr)."""
+    global _GH_TOK, _GH_TOK_READ
+    if not _GH_TOK_READ:
+        _GH_TOK_READ = True
+        try:
+            import base64
+            out = subprocess.run(["git", "config", "--get", "http.https://github.com/.extraheader"],
+                                 capture_output=True, text=True).stdout.strip()
+            if "basic " in out.lower():
+                dec = base64.b64decode(out.split()[-1]).decode("utf-8", "ignore")
+                if ":" in dec:
+                    _GH_TOK = dec.split(":", 1)[1].strip()
+        except Exception:
+            pass
+    return _GH_TOK
+
+
+def _flag_exists(name):
     try:
-        r = requests.get(
-            f"https://api.github.com/repos/{BOT_REPO}/contents/cancel_{cancel_id}.flag?ref=main",
-            headers={"Accept": "application/vnd.github+json", "User-Agent": "lawbot"}, timeout=8)
+        hdr = {"Accept": "application/vnd.github+json", "User-Agent": "lawbot"}
+        tok = _gh_token()
+        if tok:
+            hdr["Authorization"] = f"Bearer {tok}"
+        r = requests.get(f"https://api.github.com/repos/{BOT_REPO}/contents/{name}?ref=main", headers=hdr, timeout=8)
         return r.status_code == 200
     except Exception:
         return False
+
+
+def _is_cancelled(cancel_id):
+    """cancel_<id>.flag is written by the ✖ Cancel button."""
+    return bool(cancel_id) and _flag_exists(f"cancel_{cancel_id}.flag")
+
+
+def _is_paused(cancel_id):
+    """pause_<id>.flag exists while ⏸ Pause is active (removed by ▶️ Resume)."""
+    return bool(cancel_id) and _flag_exists(f"pause_{cancel_id}.flag")
 
 
 def render_and_send(chat_id, title, script, broll, reply_to=None, mid=None, cancel_id=None, thread=None):
@@ -839,6 +868,20 @@ def render_and_send(chat_id, title, script, broll, reply_to=None, mid=None, canc
     def on_progress(pct, lbl):
         if _is_cancelled(cancel_id):
             raise _Cancelled()
+        # Pause: block here while pause_<id>.flag exists, until Resume or a safety
+        # timeout (so the runner never hangs). Cancel still works while paused.
+        waited = 0
+        while _is_paused(cancel_id):
+            if _is_cancelled(cancel_id):
+                raise _Cancelled()
+            if waited == 0:
+                _edit(chat_id, mid, f"⏸ <b>Paused</b> — “{lab}” at {int(pct)}%.\nTap ▶️ Resume to continue.")
+            time.sleep(4)
+            waited += 4
+            if waited >= 600:   # auto-resume after 10 min
+                break
+        if waited > 0:
+            state["pct"] = -100   # force a fresh progress edit now that we've resumed
         # Throttle edits to avoid Telegram rate limits: only when the bar jumps
         # ≥4% AND ≥1.6s since the last edit (always send 100%).
         now = time.time()

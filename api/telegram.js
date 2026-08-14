@@ -51,6 +51,22 @@ async function ghGetJson(path) {
   } catch (e) {}
   return null;
 }
+async function ghDelete(path) {
+  try {
+    const url = `https://api.github.com/repos/${REPO}/contents/${path}`;
+    const g = await fetch(url + '?ref=main', { headers: ghHeaders });
+    if (!g.ok) return;
+    const sha = (await g.json()).sha;
+    await fetch(url, { method: 'DELETE', headers: ghHeaders, body: JSON.stringify({ message: 'rm ' + path, sha, branch: 'main' }) });
+  } catch (e) {}
+}
+// Pause+Cancel controls under the progress message (Pause flips to Resume when paused).
+function ctrlKb(pmid, paused) {
+  return { inline_keyboard: [[
+    paused ? { text: '▶️ Resume', callback_data: 'r:' + pmid } : { text: '⏸ Pause', callback_data: 'p:' + pmid },
+    { text: '✖ Cancel', callback_data: 'x:' + pmid },
+  ]] };
+}
 
 // De-duplicate Telegram webhook retries: Telegram re-sends the SAME update_id if
 // we don't reply fast enough, which was causing two renders per tap. We remember
@@ -98,7 +114,7 @@ async function startVideo(chat, replyTo, pageId, isVtest) {
   if (pmid) {
     await tg('editMessageReplyMarkup', {
       chat_id: target, message_id: pmid,
-      reply_markup: { inline_keyboard: [[{ text: '✖ Cancel', callback_data: 'x:' + pmid }]] },
+      reply_markup: ctrlKb(pmid, false),
     });
   }
   const ts = Math.floor(Date.now() / 1000);
@@ -122,7 +138,7 @@ async function startExplain(chat, replyTo, topic) {
   const pmid = sent.result && sent.result.message_id;
   if (pmid) {
     await tg('editMessageReplyMarkup', { chat_id: target, message_id: pmid,
-      reply_markup: { inline_keyboard: [[{ text: '✖ Cancel', callback_data: 'x:' + pmid }]] } });
+      reply_markup: ctrlKb(pmid, false) });
   }
   const ts = Math.floor(Date.now() / 1000);
   await ghPut('job.json', { type: 'explain', topic, chat_id: target, message_thread_id: thread || null,
@@ -157,8 +173,9 @@ module.exports = async (req, res) => {
   try {
     // De-dupe one tap that fires twice: key by (button message + action), or by
     // (chat + command text) for messages, within a short window.
+    const cqd = u.callback_query && (u.callback_query.data || '');
     const dkey = u.callback_query
-      ? 'cb:' + ((u.callback_query.message && u.callback_query.message.chat && u.callback_query.message.chat.id) || '') + ':' + ((u.callback_query.message && u.callback_query.message.message_id) || '') + ':' + (u.callback_query.data || '')
+      ? (cqd.startsWith('v:') ? 'cb:' + ((u.callback_query.message && u.callback_query.message.chat && u.callback_query.message.chat.id) || '') + ':' + ((u.callback_query.message && u.callback_query.message.message_id) || '') + ':' + cqd : null)
       : (u.message ? 'msg:' + ((u.message.chat && u.message.chat.id) || '') + ':' + ((u.message.text || '').trim().toLowerCase()) : null);
     if (await alreadyHandled(dkey)) { res.status(200).send('ok'); return; }
     const cq = u.callback_query;
@@ -166,13 +183,22 @@ module.exports = async (req, res) => {
       const data = cq.data || '';
       const chat = cq.message && cq.message.chat && cq.message.chat.id;
       const cmid = cq.message && cq.message.message_id;
-      await tg('answerCallbackQuery', { callback_query_id: cq.id, text: data.startsWith('x:') ? 'Cancelling…' : '🎬 Starting…' });
+      const toast = data[0] === 'x' ? 'Cancelling…' : data[0] === 'p' ? '⏸ Paused' : data[0] === 'r' ? '▶️ Resuming…' : '🎬 Starting…';
+      await tg('answerCallbackQuery', { callback_query_id: cq.id, text: toast });
       if (data.startsWith('v:') && chat) {
         await startVideo(chat, cmid, data.slice(2), false);
       } else if (data.startsWith('x:') && chat) {
         const pmid = data.slice(2);
         await ghPut(`cancel_${pmid}.flag`, '1', 'cancel');
         await tg('editMessageText', { chat_id: chat, message_id: Number(pmid), text: '❌ <b>Cancelling…</b>', parse_mode: 'HTML' });
+      } else if (data.startsWith('p:') && chat) {
+        const pmid = data.slice(2);
+        await ghPut(`pause_${pmid}.flag`, '1', 'pause');
+        await tg('editMessageReplyMarkup', { chat_id: chat, message_id: Number(pmid), reply_markup: ctrlKb(pmid, true) });
+      } else if (data.startsWith('r:') && chat) {
+        const pmid = data.slice(2);
+        await ghDelete(`pause_${pmid}.flag`);
+        await tg('editMessageReplyMarkup', { chat_id: chat, message_id: Number(pmid), reply_markup: ctrlKb(pmid, false) });
       }
       res.status(200).send('ok'); return;
     }
