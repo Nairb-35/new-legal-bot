@@ -104,12 +104,12 @@ TOON_MAP = [
     (("hospital","doctor","medical","clinic","treatment","health","ambulance"), "hospital"),
     (("student","school","teacher","learn","class","education","young"), "students"),
     # --- second wave: MY-specific offences & civil topics ---
-    (("macc","sprm","graft","kickback","embezzl","abuse of power"), "corruption"),
+    (("corrupt","corruption","macc","sprm","graft","kickback","embezzl","abuse of power","bribe"), "corruption"),
     (("immigration","passport","visa","migrant","deport","border"), "immigration"),
     (("roadblock","checkpoint","sekatan","breathalys","spot check"), "roadblock"),
     (("summons","saman","ticket","compound","notice to"), "summons"),
     (("tenant","landlord"," rent","tenancy","lease","eviction"), "tenancy"),
-    (("marriage","wedding","divorce","matrimon","nikah"), "marriage"),
+    (("marriage","married","marry","wedding","divorce","matrimon","nikah"), "marriage"),
     (("inherit","will ","estate","testament","beneficiar","probate","faraid"), "inheritance"),
     (("employ","worker","salary","wage","dismiss","termination","labour"), "employment"),
     (("syariah","shariah","islamic law","fatwa","khalwat"), "syariah"),
@@ -117,7 +117,7 @@ TOON_MAP = [
     (("gambl","betting","casino"," 4d","lottery","judi"), "gambling"),
     (("drink driv","drunk","alcohol","dui","intoxicat"), "drinkdriving"),
     (("vandal","graffiti","damage property","mischief"), "vandalism"),
-    (("computer","hack","data breach","malware","digital","phishing site"), "cyber"),
+    (("cyber","computer","hack","data breach","malware","digital","phishing site"), "cyber"),
     (("defam","slander","libel","social media","viral post","reputation"), "defamation"),
     (("fire","arson","burn","flame","blaze"), "fire"),
     (("flood","disaster","landslide","earthquake","haze"), "disaster"),
@@ -128,7 +128,7 @@ TOON_MAP = [
     (("oath","swear","affirm","under oath","pledge"), "oath"),
     (("mediat","settle out","reconcil","negotiate a","compromise"), "mediation"),
     (("seiz","confiscat","bailiff","repossess","impound"), "seizure"),
-    (("debt","loan","borrow","creditor","owe","repay"), "debt"),
+    (("debt","loan","borrow","creditor","owed"," owe ","repay"), "debt"),
     (("custody","guardian","adopt","welfare of the child"), "custody"),
     (("harass","stalk","threaten","intimidat","bully"), "harassment"),
     (("tax","lhdn","income tax","levy","duty"), "tax"),
@@ -152,9 +152,14 @@ def _variants(slug):
     return sorted(glob.glob(os.path.join(LIB, slug + "*.mp4")))
 
 def _toon_variants(slug):
+    # variants are exactly "<slug>.ext" or "<slug><digits>.ext" (e.g. court2.jpg)
+    # — NOT any longer word, so slug "road" never grabs "roadblock.jpg"
     vs = []
     for e in IMG_EXT:
-        vs += glob.glob(os.path.join(TOON_DIR, slug + "*" + e))
+        for p in glob.glob(os.path.join(TOON_DIR, slug + "*" + e)):
+            rem = os.path.basename(p)[len(slug):len(os.path.basename(p)) - len(e)]
+            if rem == "" or rem.isdigit():
+                vs.append(p)
     return sorted(vs)
 
 def toon_available():
@@ -170,12 +175,17 @@ def resolve(term, i, seed=0, avoid=None, toon=False):
     cat_map = TOON_MAP if toon else LIB_MAP
     pick_variants = _toon_variants if toon else _variants
     rot = TOON_ROT if toon else DEFAULT_ROT
+    # collect ALL categories whose keywords hit, in order; pick the first that
+    # actually has image files (so a broad category with no art yet doesn't
+    # swallow a term whose specific scene DOES exist)
     slug = None
+    vs = []
     for kws, sl in cat_map:
         if any(k in s for k in kws):
-            slug = sl; break
-    vs = pick_variants(slug) if slug else []
-    if not vs:  # unmatched term or that category has nothing → rotate a default
+            v = pick_variants(sl)
+            if v:
+                slug = sl; vs = v; break
+    if not vs:  # unmatched term or no matched category has art → rotate a default
         for d in [rot[(i + seed) % len(rot)]] + rot:
             vs = pick_variants(d)
             if vs: break
