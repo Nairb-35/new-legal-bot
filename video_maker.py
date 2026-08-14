@@ -140,6 +140,25 @@ def _shadow(ch):
     cv = Image.composite(Image.new("RGBA", cv.size, (0,0,0,165)), cv, m)
     cv.alpha_composite(ch, (pad, pad)); return cv
 
+
+# Pick the host's mood for a line of narration (first match wins; else neutral).
+_EMO = [
+    (("death", "died", "dies", " die", "kill", "murder", "loss", "lost", "grief", "tragic", "victim",
+      "suffer", "abandon", "cry", "tears", "hurt", "trapped", "helpless", "sadly", "alone"), "sad"),
+    (("illegal", "crime", "criminal", "attack", "violence", "assault", "fraud", "abuse", "corrupt",
+      "betray", "outrage", "unfair", "injustice", "scam", "threat", "danger", "guilty", "shocking"), "angry"),
+    (("win", "won", "victory", "justice", "freedom", "protect", "rights", "safe", "hope", "finally",
+      "follow", "made simple", "congrat", "great", "good news"), "happy"),
+    (("court", "law", "legal", "statute", "constitution", "ruling", "ruled", "judge", "section",
+      "clause", "principle", "evidence", "verdict", "case", "doctrine", "rule", "act"), "serious"),
+]
+def _emotion(text):
+    s = (text or "").lower()
+    for kws, e in _EMO:
+        if any(k in s for k in kws):
+            return e
+    return "neutral"
+
 def render(title, script, broll_terms, out_path, progress=None):
     def rep(p, label=""):
         if progress:
@@ -175,17 +194,42 @@ def render(title, script, broll_terms, out_path, progress=None):
     "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
     open(os.path.join(WORK, "subs.ass"), "w", encoding="utf-8").write(header + "\n".join(ev) + "\n")
 
-    Craw, Oraw = _remove_bg(os.path.join(HERE, "kampung_clean.png")), _remove_bg(os.path.join(HERE, "kampung_open2.png"))
-    b1, b2 = Craw.split()[3].getbbox(), Oraw.split()[3].getbbox()
-    box = (min(b1[0],b2[0]), min(b1[1],b2[1]), max(b1[2],b2[2]), max(b1[3],b2[3]))
-    bw, bh = box[2]-box[0], box[3]-box[1]; sc = 560 / bw
-    def prep(r): return _shadow(r.crop(box).resize((int(bw*sc), int(bh*sc))))
-    C, O = prep(Craw), prep(Oraw); HEAD_W, HEAD_H = C.size
+    def _prep_pair(closed_path, open_path, size=None):
+        Cr, Or = _remove_bg(closed_path), _remove_bg(open_path)
+        b1, b2 = Cr.split()[3].getbbox(), Or.split()[3].getbbox()
+        bx = (min(b1[0], b2[0]), min(b1[1], b2[1]), max(b1[2], b2[2]), max(b1[3], b2[3]))
+        w0, h0 = bx[2]-bx[0], bx[3]-bx[1]; s0 = 560 / w0
+        cc = _shadow(Cr.crop(bx).resize((int(w0*s0), int(h0*s0))))
+        oo = _shadow(Or.crop(bx).resize((int(w0*s0), int(h0*s0))))
+        if size:
+            cc, oo = cc.resize(size), oo.resize(size)
+        return cc, oo
+
+    C, O = _prep_pair(os.path.join(HERE, "kampung_clean.png"), os.path.join(HERE, "kampung_open2.png"))
+    HEAD_W, HEAD_H = C.size
+    # Per-emotion host pairs — drop <emotion>_closed.png + <emotion>_open.png into
+    # lib/emotions/ (sad, serious, angry; happy defaults to the smiling host).
+    # Missing ones simply fall back to the default host, so this never breaks.
+    EMO_DIR = os.path.join(LIB, "emotions")
+    PAIRS = {"neutral": (C, O), "happy": (C, O)}
+    for e in ("sad", "serious", "angry"):
+        cp, op = os.path.join(EMO_DIR, f"{e}_closed.png"), os.path.join(EMO_DIR, f"{e}_open.png")
+        PAIRS[e] = _prep_pair(cp, op, size=(HEAD_W, HEAD_H)) if (os.path.exists(cp) and os.path.exists(op)) else (C, O)
+
+    def _emotion_at(t):
+        idx = 0
+        for i in range(len(sentz)):
+            if sentz[i][1] <= t: idx = i
+            else: break
+        return _emotion(sentz[idx][0]) if sentz else "neutral"
+
     for f in os.listdir(WORK):
         if f.startswith("h") and f.endswith(".png"): os.remove(os.path.join(WORK, f))
     nf = int(AUD*HFPS)+1
     for k in range(nf):
-        (O if (speaking(k/HFPS) and k % 2 == 0) else C).save(os.path.join(WORK, f"h{k:04d}.png"))
+        t = k / HFPS
+        Ce, Oe = PAIRS.get(_emotion_at(t), (C, O))
+        (Oe if (speaking(t) and k % 2 == 0) else Ce).save(os.path.join(WORK, f"h{k:04d}.png"))
         if k % 12 == 0: rep(30 + 34*k/max(1, nf), "Animating host")
     subprocess.run([FF, "-y", "-framerate", str(HFPS), "-i", "h%04d.png", "-c:v", "qtrle", "head.mov",
                     "-loglevel", "error"], cwd=WORK)
