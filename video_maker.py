@@ -66,15 +66,49 @@ DEFAULT_ROT = ["court", "building", "book", "city", "office", "document"]
 # stock video clip, so the whole video is in the hand-drawn style.
 TOON_DIR = os.path.join(LIB, "toon")
 TOON_MAP = [
-    (("police","arrest","officer","raid","cop","detain","crime scene","caught","suspect"), "police"),
-    (("investigat","evidence","forensic","fingerprint","detective","gather","probe","search","clue"), "investigation"),
-    (("document","file","paper","report","record","form","folder","statement","desk"), "documents"),
-    (("book","law","statute","act","section","charge","penal","clause","constitution","rule","legal","read","code"), "book"),
-    (("court","trial","judge","hearing","prosecut","witness","testif","tribunal","lawsuit","courtroom"), "court"),
-    (("justice","verdict","sentenc","guilty","scales","ruling","ruled","gavel","punish","convict","acquit","fair","right"), "justice"),
-    (("stage","step","process","journey","first","second","third","final","begin","start","five"), "steps"),
+    # order matters: most specific first, generic/process words last
+    (("handcuff","arrest","raid","detain","caught","apprehend","nab"), "arrest"),
+    (("police","officer","cop","patrol","enforcement","pdrm"), "police"),
+    (("station","lodge","report a","police report","counter","complaint"), "station"),
+    (("investigat","evidence","forensic","fingerprint","detective","probe","clue","dna","sample"), "investigation"),
+    (("interrogat","question","statement","interview","confession","remand"), "interrogation"),
+    (("document","file","paper","record","form","folder","affidavit","paperwork"), "documents"),
+    (("sign","signature","stamp","seal","endorse","execute the"), "signature"),
+    (("book","law","statute","act ","section","penal","clause","constitution","code","legislation"), "book"),
+    (("charge","accused","indict","prosecut the","framed","allegation"), "charge"),
+    (("lawyer","advocate","solicitor","counsel","consult","legal advice","represent"), "lawyer"),
+    (("court","trial","hearing","tribunal","lawsuit","courtroom","proceeding"), "court"),
+    (("judge","magistrate","bench","preside","his lordship"), "judge"),
+    (("witness","testif","testimony","stand","cross-examin","give evidence"), "witness"),
+    (("verdict","guilty","convict","acquit","ruling","ruled","found guilty","judgment"), "verdict"),
+    (("justice","scales","fair","fairness","equality","balance","impartial"), "justice"),
+    (("sentenc","punish","penalty","jail term","imprison","fine ","whipping"), "sentence"),
+    (("jail","prison","cell","bars","lockup","custody","behind bars","incarcerat"), "jail"),
+    (("bail","release","freed","bond","surety"), "bail"),
+    (("appeal","higher court","federal court","overturn","review the"), "appeal"),
+    (("money","cash","bribe","corrupt","payment","fund","ringgit","rm ","financial"), "money"),
+    (("theft","steal","stolen","robber","burglar","snatch","shoplif"), "theft"),
+    (("weapon","knife","gun","firearm","parang","assault","attack","violen"), "weapon"),
+    (("drug","dadah","narcotic","trafficking","possession of","substance"), "drugs"),
+    (("scam","fraud","cheat","phishing","online","cyber","deceive","phone call"), "scam"),
+    (("accident","crash","collision","road accident","injur","victim","hurt"), "accident"),
+    (("road","car","vehicle","traffic","driving","drive","highway","summons"), "road"),
+    (("family","home","house","parent","child","spouse","domestic","household"), "family"),
+    (("protest","crowd","rally","demonstrat","assembly","gathering","public order"), "protest"),
+    (("city","street","urban","building","town","neighbourhood","skyline"), "city"),
+    (("deal","handshake","agree","contract","settlement","negotiat","sign the deal"), "deal"),
+    (("meeting","discuss","office","desk","work","staff","colleague","conference"), "office"),
+    (("right","freedom","liberty","entitle","protect you","know your"), "rights"),
+    (("clock","time","deadline","hour","period","limitation","expire","24"), "clock"),
+    (("malaysia","flag","nation","country","government","federal"), "malaysia"),
+    (("hospital","doctor","medical","clinic","treatment","health","ambulance"), "hospital"),
+    (("student","school","teacher","learn","class","education","young"), "students"),
+    (("stage","step","process","journey","first","second","third","final","begin","start","phase"), "steps"),
 ]
-TOON_ROT = ["court", "justice", "book", "steps", "documents", "investigation"]
+# fallback rotation when a term matches nothing (only slugs that actually exist are used)
+TOON_ROT = ["court", "justice", "book", "steps", "documents", "investigation",
+            "police", "jail", "money", "city", "office", "lawyer", "arrest",
+            "family", "road", "deal", "verdict", "rights"]
 IMG_EXT = (".jpg", ".jpeg", ".png")
 
 def _is_img(p):
