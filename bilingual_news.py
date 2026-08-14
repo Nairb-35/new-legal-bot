@@ -847,7 +847,18 @@ def _is_paused(cancel_id):
     return bool(cancel_id) and _flag_exists(f"pause_{cancel_id}.flag")
 
 
-def render_and_send(chat_id, title, script, broll, reply_to=None, mid=None, cancel_id=None, thread=None):
+def _toon_on():
+    """Cartoon-style toggle: True if toon.json in the repo says {"on": true}.
+    Default False (real stock footage). Set via the /toon command in the webhook."""
+    try:
+        if os.path.exists("toon.json"):
+            return bool(json.load(open("toon.json", encoding="utf-8")).get("on"))
+    except Exception:
+        pass
+    return False
+
+
+def render_and_send(chat_id, title, script, broll, reply_to=None, mid=None, cancel_id=None, thread=None, toon=None):
     """Render the video and send it, editing a live % progress message. If `mid`
     is given (a status message the webhook already posted) we edit that one so it
     updates instantly; otherwise we create it. If `cancel_id` is given we abort
@@ -895,7 +906,8 @@ def render_and_send(chat_id, title, script, broll, reply_to=None, mid=None, canc
         _ensure_video_deps()
         import video_maker
         out = os.path.join(os.getcwd(), "ai_short.mp4")
-        video_maker.render(title or "Malaysian Law", script, broll, out, progress=on_progress)
+        use_toon = _toon_on() if toon is None else toon
+        video_maker.render(title or "Malaysian Law", script, broll, out, progress=on_progress, toon=use_toon)
         _edit(chat_id, mid, f"✅ <b>Video ready</b> for “{lab}” — uploading… 📤")
         res = _send_video(chat_id, out,
                           caption=f"🎬 <b>{lab}</b>\nYour AI law short — ready to post! 😄",

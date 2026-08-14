@@ -247,12 +247,23 @@ module.exports = async (req, res) => {
         } else {
           await startExplain(chat, msg.message_id, topic);
         }
+      } else if (low.startsWith('/toon')) {
+        const arg = low.replace('/toon', '').trim();
+        if (arg === 'on') {
+          await ghPut('toon.json', { on: true }, 'toon on');
+          await tg('sendMessage', { chat_id: chat, message_thread_id: msg.message_thread_id, text: '🎨 Cartoon style ON — new videos use the kampung doodle backgrounds.' });
+        } else if (arg === 'off') {
+          await ghPut('toon.json', { on: false }, 'toon off');
+          await tg('sendMessage', { chat_id: chat, message_thread_id: msg.message_thread_id, text: '🎬 Cartoon style OFF — new videos use real stock footage.' });
+        } else {
+          await tg('sendMessage', { chat_id: chat, message_thread_id: msg.message_thread_id, text: 'Usage:\n/toon on — kampung cartoon backgrounds\n/toon off — real stock footage' });
+        }
       } else if (low.startsWith('/news')) {
         await tg('sendMessage', { chat_id: chat, text: '🔍 Checking for the latest legal news…' });
         await ghPut('job.json', { type: 'news', chat_id: chat, ts: Math.floor(Date.now() / 1000) }, 'news job');
         await ghDispatch();
       } else if (low.startsWith('/help') || low.startsWith('/start')) {
-        await tg('sendMessage', { chat_id: chat, text: '⚖️ Legal News Bot\n/news — latest news now\n/vtest — test the AI video maker' });
+        await tg('sendMessage', { chat_id: chat, text: '⚖️ Legal News Bot\n/news — latest news now\n/vtest — test the AI video maker\n/explain <topic> — explainer video\n/toon on|off — cartoon vs real-footage style' });
       } else if (low.startsWith('/id')) {
         const tid = msg.message_thread_id;
         await tg('sendMessage', {

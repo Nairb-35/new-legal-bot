@@ -60,22 +60,56 @@ LIB_MAP = [
 ]
 DEFAULT_ROT = ["court", "building", "book", "city", "office", "document"]
 
+# ---- CARTOON (kampung doodle) mode ----
+# Static cartoon backgrounds in lib/toon/ (user-drawn in Gemini, matching the host).
+# When toon mode is on, we map each b-roll term to one of these images instead of a
+# stock video clip, so the whole video is in the hand-drawn style.
+TOON_DIR = os.path.join(LIB, "toon")
+TOON_MAP = [
+    (("police","arrest","officer","raid","cop","detain","crime scene","caught","suspect"), "police"),
+    (("investigat","evidence","forensic","fingerprint","detective","gather","probe","search","clue"), "investigation"),
+    (("document","file","paper","report","record","form","folder","statement","desk"), "documents"),
+    (("book","law","statute","act","section","charge","penal","clause","constitution","rule","legal","read","code"), "book"),
+    (("court","trial","judge","hearing","prosecut","witness","testif","tribunal","lawsuit","courtroom"), "court"),
+    (("justice","verdict","sentenc","guilty","scales","ruling","ruled","gavel","punish","convict","acquit","fair","right"), "justice"),
+    (("stage","step","process","journey","first","second","third","final","begin","start","five"), "steps"),
+]
+TOON_ROT = ["court", "justice", "book", "steps", "documents", "investigation"]
+IMG_EXT = (".jpg", ".jpeg", ".png")
+
+def _is_img(p):
+    return bool(p) and p.lower().endswith(IMG_EXT)
+
 def _variants(slug):
     return sorted(glob.glob(os.path.join(LIB, slug + "*.mp4")))
 
-def resolve(term, i, seed=0, avoid=None):
-    """Map a term to a category, then pick ONE of that category's clip variants,
-    varying by (seed+i) so different videos and different lines get different
-    footage; never repeat the immediately-previous clip when a variant exists."""
+def _toon_variants(slug):
+    vs = []
+    for e in IMG_EXT:
+        vs += glob.glob(os.path.join(TOON_DIR, slug + "*" + e))
+    return sorted(vs)
+
+def toon_available():
+    return bool(glob.glob(os.path.join(TOON_DIR, "*.jpg")) or
+                glob.glob(os.path.join(TOON_DIR, "*.png")))
+
+def resolve(term, i, seed=0, avoid=None, toon=False):
+    """Map a term to a category, then pick ONE of that category's variants, varying
+    by (seed+i) so different videos/lines get different backgrounds; never repeat the
+    immediately-previous one when another variant exists. In toon mode, the variants
+    are cartoon images from lib/toon/ instead of stock video clips."""
     s = (term or "").lower()
+    cat_map = TOON_MAP if toon else LIB_MAP
+    pick_variants = _toon_variants if toon else _variants
+    rot = TOON_ROT if toon else DEFAULT_ROT
     slug = None
-    for kws, sl in LIB_MAP:
+    for kws, sl in cat_map:
         if any(k in s for k in kws):
             slug = sl; break
-    vs = _variants(slug) if slug else []
-    if not vs:  # unmatched term or that category has no clips → rotate a default
-        for d in [DEFAULT_ROT[(i + seed) % len(DEFAULT_ROT)]] + DEFAULT_ROT:
-            vs = _variants(d)
+    vs = pick_variants(slug) if slug else []
+    if not vs:  # unmatched term or that category has nothing → rotate a default
+        for d in [rot[(i + seed) % len(rot)]] + rot:
+            vs = pick_variants(d)
             if vs: break
     if not vs:
         return None
@@ -159,13 +193,17 @@ def _emotion(text):
             return e
     return "neutral"
 
-def render(title, script, broll_terms, out_path, progress=None):
+def render(title, script, broll_terms, out_path, progress=None, toon=None):
     def rep(p, label=""):
         if progress:
             try: progress(int(p), label)
             except Exception: pass
     script = (script or "").strip()
     if not script: raise ValueError("empty script")
+    # toon=None → auto (cartoon if a lib/toon/ set exists); toon=True/False forces it.
+    if toon is None:
+        toon = toon_available()
+    toon = bool(toon) and toon_available()
     rep(4, "Preparing")
     audio = os.path.join(WORK, "voice.mp3")
     sentz = _synth(script, audio)
@@ -242,10 +280,16 @@ def render(title, script, broll_terms, out_path, progress=None):
     last = None; lines = []
     for i in range(len(sentz)):
         term = terms[i] if i < len(terms) else sentz[i][0]
-        src = _pexels_fetch(term, i + seed) or resolve(term, i, seed, avoid=last) or last
+        if toon:  # cartoon mode: bundled doodle images only (no live stock footage)
+            src = resolve(term, i, seed, avoid=last, toon=True) or last
+        else:
+            src = _pexels_fetch(term, i + seed) or resolve(term, i, seed, avoid=last) or last
         if src: last = src
         dur = max(0.6, ends[i]-starts[i]); seg = os.path.join(WORK, f"s{i:02d}.mp4")
-        if src:
+        if src and _is_img(src):   # static cartoon background
+            inp = ["-loop", "1", "-i", src]
+            vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30"
+        elif src:
             inp = ["-stream_loop", "-1", "-i", src]
             vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30"
         else:  # gradient fallback (should be rare)
