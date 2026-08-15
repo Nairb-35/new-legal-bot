@@ -947,8 +947,13 @@ def run_pending_job():
         job = json.load(open("job.json", encoding="utf-8"))
     except Exception:
         _delete_repo_file("job.json"); return True
-    if job.get("ts") and (time.time() - job["ts"]) > 300:
-        _delete_repo_file("job.json"); return True   # stale (>5 min) — don't re-render a lingering job
+    # Drop only genuinely-abandoned jobs. The window MUST exceed the runner cadence
+    # (cron every 30 min + webhook dispatch) — otherwise a job queued between runs is
+    # deleted as "stale" before any runner gets to render it (this silently stuck
+    # /explain at 0%). job.json is already deleted at start below, so double-runs are
+    # prevented by deletion, not by this guard.
+    if job.get("ts") and (time.time() - job["ts"]) > 2400:
+        _delete_repo_file("job.json"); return True   # stale (>40 min) — abandoned
     _delete_repo_file("job.json")   # clear first so it can never double-run
     t = job.get("type"); chat = job.get("chat_id")
     pmid = job.get("progress_msg_id"); reply = job.get("reply_to")
