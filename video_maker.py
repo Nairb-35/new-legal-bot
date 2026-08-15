@@ -256,7 +256,9 @@ def _wrap_caption(text, width=18):
 
 def _caption_markup(text):
     """Give every caption a small kinetic colour accent without changing the art."""
-    clean = re.sub(r"[{}]", "", (text or "")).strip().strip(",.—– ").upper()
+    # Keep the script's punctuation: it carries meaning and makes short caption
+    # chunks read naturally instead of looking like disconnected word cards.
+    clean = re.sub(r"[{}]", "", (text or "")).strip().upper()
     wrapped = _wrap_caption(clean)
     words = wrapped.split()
     if len(words) < 2:
@@ -379,9 +381,9 @@ def render(title, script, broll_terms, out_path, progress=None, toon=None):
     for k in range(nf):
         t = k / HFPS
         Ce, Oe = PAIRS.get(_emotion_at(t), (C, O))
-        # A slower closed-open-open-closed-closed cycle reads as speech instead
-        # of the rapid two-frame chatter used by the original host animation.
-        mouth_open = speaking(t) and (k % 5) in (1, 2)
+        # A four-frame cycle stays natural but tracks fast captioned speech more
+        # closely than the slower five-frame version.
+        mouth_open = speaking(t) and (k % 4) in (1, 2)
         (Oe if mouth_open else Ce).save(os.path.join(WORK, f"h{k:04d}.png"))
         if k % 12 == 0: rep(30 + 34*k/max(1, nf), "Animating host")
     subprocess.run([FF, "-y", "-framerate", str(HFPS), "-i", "h%04d.png", "-c:v", "qtrle", "head.mov",
@@ -403,13 +405,11 @@ def render(title, script, broll_terms, out_path, progress=None, toon=None):
         dur = max(0.6, ends[i]-starts[i]); seg = os.path.join(WORK, f"s{i:02d}.mp4")
         if src and _is_img(src):   # static cartoon background
             inp = ["-loop", "1", "-i", src]
-            phase = (i % 4) * 0.75
-            vf = ("scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
-                  "zoompan=z='min(zoom+0.00022,1.028)':"
-                  f"x='iw/2-(iw/zoom/2)+3*sin(on/41+{phase})':"
-                  f"y='ih/2-(ih/zoom/2)+3*cos(on/47+{phase})':d=1:s=1080x1920:fps=30,"
-                  "unsharp=5:5:0.42:3:3:0.0,"
-                  "eq=saturation=1.045:contrast=1.025:brightness=0.015,setsar=1")
+            # Toon scenes are already authored at 1080x1920. Avoid zoompan's
+            # extra resampling and keep the original line work pixel-sharp.
+            vf = ("scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
+                  "crop=1080:1920,unsharp=5:5:0.58:3:3:0.0,"
+                  "eq=saturation=1.04:contrast=1.03:brightness=0.012,setsar=1,fps=30")
         elif src:
             inp = ["-stream_loop", "-1", "-i", src]
             phase = (i % 4) * 0.75
@@ -422,7 +422,8 @@ def render(title, script, broll_terms, out_path, progress=None, toon=None):
             inp = ["-f", "lavfi", "-i", "color=c=0x12162e:s=1080x1920:r=30"]
             vf = "setsar=1"
         subprocess.run([FF, "-y", *inp, "-t", f"{dur:.3f}", "-vf", vf,
-            "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", seg, "-loglevel", "error"])
+            "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "15",
+            seg, "-loglevel", "error"])
         lines.append(f"file 's{i:02d}.mp4'")
         rep(66 + 26*(i+1)/max(1, len(sentz)), "Building backgrounds")
     open(os.path.join(WORK, "list.txt"), "w").write("\n".join(lines))
@@ -437,7 +438,7 @@ def render(title, script, broll_terms, out_path, progress=None, toon=None):
                             "[2:a]highpass=f=75,acompressor=threshold=-18dB:ratio=3:attack=18:release=220,"
                             "loudnorm=I=-16:TP=-1.5:LRA=7[a]"),
         "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-preset", "medium", "-crf", "16", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+        "-preset", "medium", "-crf", "15", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-movflags", "+faststart", "-shortest", out_path, "-loglevel", "error"], cwd=WORK)
     rep(100, "Done")
     return out_path
