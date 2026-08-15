@@ -3,5 +3,6 @@
   "framework": null,
   "buildCommand": null,
   "installCommand": null,
-  "outputDirectory": "public"
+  "outputDirectory": "public",
+  "ignoreCommand": "test -z \"$(git diff --name-only HEAD^ HEAD | grep -vE '^\\\\.bot/')\""
 }

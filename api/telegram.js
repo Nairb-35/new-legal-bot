@@ -3,8 +3,8 @@
 // Purpose: give an INSTANT response when a user taps "Make AI Video" (or sends
 // /vtest, /news). Telegram pushes each update here the moment it happens; we
 // immediately post a "0%" progress message (with a Cancel button), then hand the
-// heavy rendering to GitHub Actions by writing job.json to the bot repo and
-// triggering a workflow_dispatch. The Actions run reads job.json and renders,
+// heavy rendering to GitHub Actions by writing a unique job file to the bot repo
+// and triggering a workflow_dispatch. The Actions run reads that job and renders,
 // editing the same progress message as it goes.
 //
 // Env vars needed on Vercel:
@@ -12,10 +12,18 @@
 //   BOT_GH_TOKEN      — a GitHub fine-grained PAT for Nairb-35/new-legal-bot with
 //                       Contents: read/write AND Actions: read/write
 //   BOT_REPO          — optional, defaults to "Nairb-35/new-legal-bot"
+//   TELEGRAM_WEBHOOK_SECRET — required secret_token used to authenticate updates
+//   BOT_SETUP_SECRET  — required for the webhook setup/teardown endpoint
+//   BOT_ADMIN_USER_IDS — optional comma-separated Telegram user IDs allowed to
+//                        run costly/configuration commands (empty = any real user)
 
+const crypto = require('crypto');
 const TG = process.env.TELEGRAMBOTTOKEN;
 const GH = process.env.BOT_GH_TOKEN;
 const REPO = process.env.BOT_REPO || 'Nairb-35/new-legal-bot';
+const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET;
+const SETUP_SECRET = process.env.BOT_SETUP_SECRET;
+const ADMIN_USERS = new Set((process.env.BOT_ADMIN_USER_IDS || '').split(',').map((x) => x.trim()).filter(Boolean));
 const VIDEO_CHAT = process.env.VIDEO_CHAT_ID;   // if set, finished videos go to THIS chat, not the news group
 const VIDEO_TOPIC = process.env.VIDEO_TOPIC_ID; // if set, videos go to this forum topic (thread) within the chat
 
@@ -23,7 +31,9 @@ async function tg(method, body) {
   const r = await fetch(`https://api.telegram.org/bot${TG}/${method}`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
   });
-  return r.json().catch(() => ({}));
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok || data.ok === false) throw new Error(`Telegram ${method} failed: ${data.description || r.status}`);
+  return data;
 }
 
 const ghHeaders = {
@@ -37,12 +47,21 @@ async function ghPut(path, obj, message) {
   const content = Buffer.from(typeof obj === 'string' ? obj : JSON.stringify(obj)).toString('base64');
   const body = { message, content, branch: 'main' };
   if (sha) body.sha = sha;
-  return fetch(url, { method: 'PUT', headers: ghHeaders, body: JSON.stringify(body) });
+  const r = await fetch(url, { method: 'PUT', headers: ghHeaders, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(`GitHub write failed for ${path}: ${r.status} ${(await r.text()).slice(0, 160)}`);
+  return r;
 }
-async function ghDispatch() {
-  return fetch(`https://api.github.com/repos/${REPO}/actions/workflows/run_bot.yml/dispatches`, {
-    method: 'POST', headers: ghHeaders, body: JSON.stringify({ ref: 'main' }),
+async function ghDispatch(jobId) {
+  const r = await fetch(`https://api.github.com/repos/${REPO}/actions/workflows/run_bot.yml/dispatches`, {
+    method: 'POST', headers: ghHeaders, body: JSON.stringify({ ref: 'main', inputs: { job_id: jobId } }),
   });
+  if (!r.ok) throw new Error(`GitHub workflow dispatch failed: ${r.status} ${(await r.text()).slice(0, 160)}`);
+}
+async function queueJob(job, updateId) {
+  const safeId = String(updateId || crypto.randomUUID()).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80);
+  await ghPut(`.bot/jobs/${safeId}.json`, { ...job, id: safeId }, `queue bot job ${safeId}`);
+  await ghDispatch(safeId);
+  return safeId;
 }
 async function ghGetJson(path) {
   try {
@@ -77,7 +96,7 @@ async function alreadyHandled(key) {
   // near-simultaneous calls race, the loser gets a 409, re-reads, and sees the
   // winner already claimed the key -> it skips. Stops ANY double-fire per tap.
   if (!key) return false;
-  const url = `https://api.github.com/repos/${REPO}/contents/seen.json`;
+  const url = `https://api.github.com/repos/${REPO}/contents/.bot/seen.json`;
   for (let attempt = 0; attempt < 3; attempt++) {
     let sha, list = [];
     try {
@@ -100,7 +119,7 @@ async function alreadyHandled(key) {
 
 const PROG0 = '🎬 <b>Making AI video…</b>\n\n░░░░░░░░░░  0%\n<i>Queued — starting…</i>';
 
-async function startVideo(chat, replyTo, pageId, isVtest) {
+async function startVideo(chat, replyTo, pageId, isVtest, updateId) {
   const cfg = await ghGetJson('videocfg.json');      // set by /setvideos in the chat/topic you want
   const target = (cfg && cfg.chat_id) || VIDEO_CHAT || chat;
   const thread = (cfg && cfg.thread_id) || (VIDEO_TOPIC ? Number(VIDEO_TOPIC) : undefined);
@@ -120,11 +139,10 @@ async function startVideo(chat, replyTo, pageId, isVtest) {
   const ts = Math.floor(Date.now() / 1000);
   const base = { chat_id: target, message_thread_id: thread || null, progress_msg_id: pmid, reply_to: reply || null, ts };
   const job = isVtest ? { type: 'vtest', ...base } : { type: 'render', page_id: pageId, ...base };
-  await ghPut('job.json', job, 'queue video job');
-  await ghDispatch();
+  await queueJob(job, updateId);
 }
 
-async function startExplain(chat, replyTo, topic) {
+async function startExplain(chat, replyTo, topic, updateId) {
   const cfg = await ghGetJson('explaincfg.json');     // set by /setupexplainers
   const target = (cfg && cfg.chat_id) || chat;
   const thread = (cfg && cfg.thread_id) || undefined;
@@ -141,9 +159,17 @@ async function startExplain(chat, replyTo, topic) {
       reply_markup: ctrlKb(pmid, false) });
   }
   const ts = Math.floor(Date.now() / 1000);
-  await ghPut('job.json', { type: 'explain', topic, chat_id: target, message_thread_id: thread || null,
-    progress_msg_id: pmid, reply_to: reply || null, ts }, 'queue explainer job');
-  await ghDispatch();
+  await queueJob({ type: 'explain', topic, chat_id: target, message_thread_id: thread || null,
+    progress_msg_id: pmid, reply_to: reply || null, ts }, updateId);
+}
+
+function secretMatches(actual, expected) {
+  if (!actual || !expected) return false;
+  const a = Buffer.from(String(actual)); const b = Buffer.from(String(expected));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function isAdmin(userId) {
+  return ADMIN_USERS.size === 0 || ADMIN_USERS.has(String(userId || ''));
 }
 
 function readRaw(req) {
@@ -152,13 +178,15 @@ function readRaw(req) {
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
-    // Self-setup: visiting /api/telegram?setup=1 points Telegram's webhook at
-    // this URL using the bot token already stored in Vercel env — no need to
-    // paste the token into a browser. ?setup=off removes it.
+    // Setup is an authenticated administrative operation.
     try {
-      const q = req.url || '';
+      const parsed = new URL(req.url || '/', `https://${req.headers.host}`);
+      const supplied = req.headers['x-bot-admin-secret'] || parsed.searchParams.get('admin_secret');
+      if (!secretMatches(supplied, SETUP_SECRET)) { res.status(401).send('unauthorized'); return; }
+      const q = parsed.search;
       if (q.includes('setup=1')) {
-        const r = await tg('setWebhook', { url: `https://${req.headers.host}/api/telegram` });
+        if (!WEBHOOK_SECRET) { res.status(503).send('TELEGRAM_WEBHOOK_SECRET is not configured'); return; }
+        const r = await tg('setWebhook', { url: `https://${req.headers.host}/api/telegram`, secret_token: WEBHOOK_SECRET });
         res.status(200).json(r); return;
       }
       if (q.includes('setup=off')) {
@@ -167,6 +195,10 @@ module.exports = async (req, res) => {
       }
     } catch (e) {}
     res.status(200).send('ok'); return;
+  }
+  if (!secretMatches(req.headers['x-telegram-bot-api-secret-token'], WEBHOOK_SECRET)) {
+    console.warn('Rejected unauthenticated Telegram webhook request');
+    res.status(401).send('unauthorized'); return;
   }
   let u = req.body;
   if (!u || typeof u !== 'object') { try { u = JSON.parse(await readRaw(req)); } catch (e) { u = {}; } }
@@ -186,18 +218,18 @@ module.exports = async (req, res) => {
       const toast = data[0] === 'x' ? 'Cancelling…' : data[0] === 'p' ? '⏸ Paused' : data[0] === 'r' ? '▶️ Resuming…' : '🎬 Starting…';
       await tg('answerCallbackQuery', { callback_query_id: cq.id, text: toast });
       if (data.startsWith('v:') && chat) {
-        await startVideo(chat, cmid, data.slice(2), false);
+        await startVideo(chat, cmid, data.slice(2), false, u.update_id);
       } else if (data.startsWith('x:') && chat) {
         const pmid = data.slice(2);
-        await ghPut(`cancel_${pmid}.flag`, '1', 'cancel');
+        await ghPut(`.bot/control/cancel_${pmid}.flag`, '1', 'cancel');
         await tg('editMessageText', { chat_id: chat, message_id: Number(pmid), text: '❌ <b>Cancelling…</b>', parse_mode: 'HTML' });
       } else if (data.startsWith('p:') && chat) {
         const pmid = data.slice(2);
-        await ghPut(`pause_${pmid}.flag`, '1', 'pause');
+        await ghPut(`.bot/control/pause_${pmid}.flag`, '1', 'pause');
         await tg('editMessageReplyMarkup', { chat_id: chat, message_id: Number(pmid), reply_markup: ctrlKb(pmid, true) });
       } else if (data.startsWith('r:') && chat) {
         const pmid = data.slice(2);
-        await ghDelete(`pause_${pmid}.flag`);
+        await ghDelete(`.bot/control/pause_${pmid}.flag`);
         await tg('editMessageReplyMarkup', { chat_id: chat, message_id: Number(pmid), reply_markup: ctrlKb(pmid, false) });
       }
       res.status(200).send('ok'); return;
@@ -207,8 +239,14 @@ module.exports = async (req, res) => {
     const chat = msg && msg.chat && msg.chat.id;
     if (text && chat) {
       const low = text.toLowerCase();
+      const privileged = ['/vtest', '/setupvideos', '/setvideos', '/setupexplainers', '/explain', '/toon', '/news']
+        .some((cmd) => low.startsWith(cmd));
+      if (privileged && !isAdmin(msg.from && msg.from.id)) {
+        await tg('sendMessage', { chat_id: chat, text: '⛔ This command is restricted to bot administrators.' });
+        res.status(200).send('ok'); return;
+      }
       if (low.startsWith('/vtest')) {
-        await startVideo(chat, msg.message_id, null, true);
+        await startVideo(chat, msg.message_id, null, true, u.update_id);
       } else if (low.startsWith('/setupvideos')) {
         // Bot creates its own "AI Videos" forum topic and routes videos there.
         const r = await tg('createForumTopic', { chat_id: chat, name: '🎬 AI Videos' });
@@ -245,7 +283,7 @@ module.exports = async (req, res) => {
         if (!topic) {
           await tg('sendMessage', { chat_id: chat, message_thread_id: msg.message_thread_id, text: 'Add a topic, e.g.  /explain thin skull rule' });
         } else {
-          await startExplain(chat, msg.message_id, topic);
+          await startExplain(chat, msg.message_id, topic, u.update_id);
         }
       } else if (low.startsWith('/toon')) {
         const arg = low.replace('/toon', '').trim();
@@ -260,8 +298,7 @@ module.exports = async (req, res) => {
         }
       } else if (low.startsWith('/news')) {
         await tg('sendMessage', { chat_id: chat, text: '🔍 Checking for the latest legal news…' });
-        await ghPut('job.json', { type: 'news', chat_id: chat, ts: Math.floor(Date.now() / 1000) }, 'news job');
-        await ghDispatch();
+        await queueJob({ type: 'news', chat_id: chat, ts: Math.floor(Date.now() / 1000) }, u.update_id);
       } else if (low.startsWith('/help') || low.startsWith('/start')) {
         await tg('sendMessage', { chat_id: chat, text: '⚖️ Legal News Bot\n/news — latest news now\n/vtest — test the AI video maker\n/explain <topic> — explainer video\n/toon on|off — cartoon vs real-footage style' });
       } else if (low.startsWith('/id')) {
@@ -274,6 +311,7 @@ module.exports = async (req, res) => {
     }
     res.status(200).send('ok');
   } catch (e) {
+    console.error('Telegram webhook failed', { message: e && e.message, update_id: u && u.update_id });
     res.status(200).send('ok');
   }
 };

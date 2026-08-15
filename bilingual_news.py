@@ -839,12 +839,12 @@ def _flag_exists(name):
 
 def _is_cancelled(cancel_id):
     """cancel_<id>.flag is written by the ✖ Cancel button."""
-    return bool(cancel_id) and _flag_exists(f"cancel_{cancel_id}.flag")
+    return bool(cancel_id) and _flag_exists(f".bot/control/cancel_{cancel_id}.flag")
 
 
 def _is_paused(cancel_id):
     """pause_<id>.flag exists while ⏸ Pause is active (removed by ▶️ Resume)."""
-    return bool(cancel_id) and _flag_exists(f"pause_{cancel_id}.flag")
+    return bool(cancel_id) and _flag_exists(f".bot/control/pause_{cancel_id}.flag")
 
 
 def _toon_on():
@@ -922,39 +922,52 @@ def render_and_send(chat_id, title, script, broll, reply_to=None, mid=None, canc
         _edit(chat_id, mid, f"⚠️ Sorry, the video render failed for “{lab}”: {str(e)[:150]}")
 
 
-# ---- webhook job queue: the Vercel webhook writes job.json + triggers a run ----
+# ---- webhook job queue: each update gets an isolated job file ----
 def _delete_repo_file(path):
-    """Remove a file from the repo so a job never re-runs on the next cron. Uses
-    the checkout's own git credentials (actions/checkout persists a token), so no
-    extra token needs to be exposed to the Actions environment."""
-    if not os.path.exists(path):
-        return
+    """Atomically remove one runtime-state file through GitHub's API. This avoids
+    non-fast-forward push races when several job runners finish concurrently."""
     try:
-        subprocess.run(["git", "rm", "-f", "--quiet", path], check=False)
-        subprocess.run(["git", "-c", "user.email=bot@users.noreply.github.com",
-                        "-c", "user.name=news-bot", "commit", "-q", "-m", f"clear {path}"], check=False)
-        subprocess.run(["git", "push", "-q", "origin", "HEAD:main"], check=False)
+        token = BOT_GH_TOKEN or _gh_token()
+        headers = {"Accept": "application/vnd.github+json", "User-Agent": "lawbot"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        url = f"https://api.github.com/repos/{BOT_REPO}/contents/{path}"
+        current = requests.get(url, params={"ref": "main"}, headers=headers, timeout=15)
+        if current.status_code == 404:
+            return
+        current.raise_for_status()
+        deleted = requests.delete(url, headers=headers, timeout=15, json={
+            "message": f"clear bot state {os.path.basename(path)}",
+            "sha": current.json()["sha"],
+            "branch": "main",
+        })
+        deleted.raise_for_status()
     except Exception as e:
         print("delete repo file error:", e)
 
 
 def run_pending_job():
-    """If the webhook queued a job (job.json in the checkout), run it and clear it.
+    """Run the exact webhook job named by BOT_JOB_ID and clear it first.
     Returns True if a job was handled (so the caller skips the normal news run)."""
-    if not os.path.exists("job.json"):
+    job_id = re.sub(r"[^A-Za-z0-9_-]", "", os.getenv("BOT_JOB_ID", ""))[:80]
+    if not job_id:
         return False
+    job_path = f".bot/jobs/{job_id}.json"
+    if not os.path.exists(job_path):
+        print(f"Job {job_id} is missing or was already claimed")
+        return True
     try:
-        job = json.load(open("job.json", encoding="utf-8"))
+        job = json.load(open(job_path, encoding="utf-8"))
     except Exception:
-        _delete_repo_file("job.json"); return True
+        _delete_repo_file(job_path); return True
     # Drop only genuinely-abandoned jobs. The window MUST exceed the runner cadence
     # (cron every 30 min + webhook dispatch) — otherwise a job queued between runs is
     # deleted as "stale" before any runner gets to render it (this silently stuck
-    # /explain at 0%). job.json is already deleted at start below, so double-runs are
-    # prevented by deletion, not by this guard.
+    # /explain at 0%). The unique job file is deleted at start below, so double-runs
+    # are prevented by deletion, not by this guard.
     if job.get("ts") and (time.time() - job["ts"]) > 2400:
-        _delete_repo_file("job.json"); return True   # stale (>40 min) — abandoned
-    _delete_repo_file("job.json")   # clear first so it can never double-run
+        _delete_repo_file(job_path); return True   # stale (>40 min) — abandoned
+    _delete_repo_file(job_path)   # claim first so it can never double-run
     t = job.get("type"); chat = job.get("chat_id")
     pmid = job.get("progress_msg_id"); reply = job.get("reply_to")
     thread = job.get("message_thread_id")
