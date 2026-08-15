@@ -236,6 +236,45 @@ def _caps(sentz):
         return out
     return asyncio.run(go())
 
+def _wrap_caption(text, width=18):
+    """Wrap a short caption into at most three balanced, mobile-safe lines."""
+    words = (text or "").split()
+    if not words:
+        return ""
+    lines, current = [], []
+    for word in words:
+        candidate = " ".join(current + [word])
+        if current and len(candidate) > width:
+            lines.append(" ".join(current)); current = [word]
+        else:
+            current.append(word)
+    if current:
+        lines.append(" ".join(current))
+    while len(lines) > 3:
+        lines[-2:] = [" ".join(lines[-2:])]
+    return r"\N".join(lines)
+
+def _caption_markup(text):
+    """Give every caption a small kinetic colour accent without changing the art."""
+    clean = re.sub(r"[{}]", "", (text or "")).strip().strip(",.—– ").upper()
+    wrapped = _wrap_caption(clean)
+    words = wrapped.split()
+    if len(words) < 2:
+        return wrapped
+    # Highlight the final semantic beat in kampung-gold; reset is explicit so
+    # punctuation and following ASS events cannot inherit the colour.
+    last = words[-1]
+    prefix = " ".join(words[:-1])
+    return prefix + r" {\c&H0015CCFA&}" + last + r"{\c&H00FFFFFF&}"
+
+def _beat_label(index, count):
+    labels = ("THE BIG QUESTION", "THE FOUNDATION", "HOW IT WORKS",
+              "WHAT THE COURTS DO", "THE TAKEAWAY")
+    if count <= 1:
+        return labels[-1]
+    slot = min(len(labels) - 1, int((index / max(1, count - 1)) * len(labels)))
+    return labels[slot]
+
 # ---- cartoon host ----
 def _remove_bg(path):
     im = Image.open(path).convert("RGB"); w, h = im.size
@@ -300,13 +339,19 @@ def render(title, script, broll_terms, out_path, progress=None, toon=None):
     for i in range(len(caps)-1): caps[i][2] = caps[i+1][1]
     caps[-1][2] = AUD
     rep(30, "Captions ready")
-    def disp(t): return t.replace("{","").replace("}","").strip().strip(",.—– ").upper()
     def tt(x):
         h=int(x//3600); mn=int(x%3600//60); s=x%60; return f"{h:d}:{mn:02d}:{s:05.2f}"
-    ev = [f"Dialogue: 0,{tt(a)},{tt(b)},Main,,0,0,0,,{disp(c)}" for c, a, b in caps]
+    ev = [f"Dialogue: 2,{tt(a)},{tt(b)},Main,,0,0,0,,{{\\fad(90,80)}}{_caption_markup(c)}"
+          for c, a, b in caps]
+    for i, (_, start, duration) in enumerate(sentz):
+        ev.append(f"Dialogue: 1,{tt(start)},{tt(min(AUD, start+duration))},Beat,,0,0,0,,{{\\fad(140,120)}}{i+1:02d}  ·  {_beat_label(i, len(sentz))}")
+    if AUD > 3:
+        ev.append(f"Dialogue: 3,{tt(max(0, AUD-2.2))},{tt(AUD)},End,,0,0,0,,{{\\fad(180,220)}}SAVE  ·  SHARE  ·  FOLLOW")
     header = ("[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n"
     "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-    "Style: Main,Arial,104,&H00FFFFFF,&H000000FF,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,1,9,3,2,70,70,780,1\n\n"
+    "Style: Main,Arial,82,&H00FFFFFF,&H000000FF,&H00181B24,&H70000000,-1,0,0,0,100,100,0,0,1,7,2,8,82,82,305,1\n"
+    "Style: Beat,Arial,42,&H00FFFFFF,&H000000FF,&H00181B24,&H9A181B24,-1,0,0,0,100,100,1,0,3,2,0,7,68,68,82,1\n"
+    "Style: End,Arial,46,&H0015CCFA,&H000000FF,&H00181B24,&H90000000,-1,0,0,0,100,100,3,0,3,2,0,2,70,70,74,1\n\n"
     "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
     open(os.path.join(WORK, "subs.ass"), "w", encoding="utf-8").write(header + "\n".join(ev) + "\n")
 
@@ -366,10 +411,20 @@ def render(title, script, broll_terms, out_path, progress=None, toon=None):
         dur = max(0.6, ends[i]-starts[i]); seg = os.path.join(WORK, f"s{i:02d}.mp4")
         if src and _is_img(src):   # static cartoon background
             inp = ["-loop", "1", "-i", src]
-            vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30"
+            phase = (i % 4) * 0.75
+            vf = ("scale=1220:2169:force_original_aspect_ratio=increase,crop=1220:2169,"
+                  "zoompan=z='min(zoom+0.00075,1.085)':"
+                  f"x='iw/2-(iw/zoom/2)+10*sin(on/37+{phase})':"
+                  f"y='ih/2-(ih/zoom/2)+8*cos(on/43+{phase})':d=1:s=1080x1920:fps=30,"
+                  "eq=saturation=1.08:contrast=1.035:brightness=0.008,"
+                  "vignette=PI/5,setsar=1")
         elif src:
             inp = ["-stream_loop", "-1", "-i", src]
-            vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30"
+            phase = (i % 4) * 0.75
+            vf = ("scale=1220:2169:force_original_aspect_ratio=increase,"
+                  f"crop=1080:1920:x='(iw-ow)/2+22*sin(t*0.28+{phase})':"
+                  f"y='(ih-oh)/2+16*cos(t*0.22+{phase})',"
+                  "eq=saturation=1.06:contrast=1.035,vignette=PI/5,setsar=1,fps=30")
         else:  # gradient fallback (should be rare)
             inp = ["-f", "lavfi", "-i", "color=c=0x12162e:s=1080x1920:r=30"]
             vf = "setsar=1"
@@ -385,8 +440,12 @@ def render(title, script, broll_terms, out_path, progress=None, toon=None):
     oy = 1920 - HEAD_H - 30
     rep(96, "Adding captions & audio")
     subprocess.run([FF, "-y", "-i", "bg.mp4", "-i", os.path.join(WORK, "head.mov"), "-i", audio,
-        "-filter_complex", f"[0:v][1:v]overlay=8:{oy}:shortest=1,ass=subs.ass[v]",
-        "-map", "[v]", "-map", "2:a", "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "160k", "-shortest", out_path, "-loglevel", "error"], cwd=WORK)
+        "-filter_complex", (f"[0:v]drawbox=x=0:y=0:w=iw:h=520:color=0x101522@0.16:t=fill[bg];"
+                            f"[bg][1:v]overlay=x='8+4*sin(t*2.2)':y='{oy}+5*sin(t*2.8)':shortest=1,ass=subs.ass[v];"
+                            "[2:a]highpass=f=75,acompressor=threshold=-18dB:ratio=3:attack=18:release=220,"
+                            "loudnorm=I=-16:TP=-1.5:LRA=7[a]"),
+        "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-preset", "medium", "-crf", "18", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+        "-movflags", "+faststart", "-shortest", out_path, "-loglevel", "error"], cwd=WORK)
     rep(100, "Done")
     return out_path
