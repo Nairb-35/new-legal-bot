@@ -14,7 +14,7 @@ LIB = os.path.join(HERE, "lib")
 WORK = os.path.join(HERE, "_vwork")
 os.makedirs(WORK, exist_ok=True)
 FF = imageio_ffmpeg.get_ffmpeg_exe()
-VOICE, RATE = "en-US-AndrewNeural", "+8%"
+VOICE, RATE = "en-US-AndrewNeural", "+15%"
 HFPS = 15
 PEXELS_PROXY = "https://new-legal-bot.vercel.app/api/pexels"   # returns a fresh Pexels clip URL if a key is set
 
@@ -66,6 +66,21 @@ DEFAULT_ROT = ["court", "building", "book", "city", "office", "document"]
 # stock video clip, so the whole video is in the hand-drawn style.
 TOON_DIR = os.path.join(LIB, "toon")
 TOON_HQ_DIR = os.path.join(LIB, "toon_hq")
+TOON_ACTION_DIR = os.path.join(LIB, "toon_action")
+# Dedicated reenactments take priority over symbolic legal plates. These are
+# intentionally narrow matches: a generic story about a weapon should not show
+# the stabbing scene, while a described case should show people doing the act.
+TOON_ACTION_MAP = [
+    (("deliberately stab", "intending to kill", "intent to kill", "intentional killing",
+      "intentional attack", "knife attack"), "intentional_attack"),
+    (("one punch", "single punch", "punch causation", "punch legally caused"), "one_punch"),
+    (("fragile skull", "thin-skull", "thin skull"), "fragile_skull"),
+    (("danger ends", "danger has ended", "keeps attacking", "continued attack",
+      "excessive retaliation", "excessive self-defence", "disproportionate self-defence"),
+     "excessive_defence"),
+    (("packed station", "crowded station", "crowded train", "imminently dangerous",
+      "throws a bomb", "bomb into"), "crowded_station_danger"),
+]
 TOON_MAP = [
     # order matters: most specific first, generic/process words last
     (("handcuff","arrest","raid","detain","caught","apprehend","nab"), "arrest"),
@@ -192,6 +207,9 @@ def _is_img(p):
 def _variants(slug):
     return sorted(glob.glob(os.path.join(LIB, slug + "*.mp4")))
 
+def _toon_action_variants(slug):
+    return sorted(glob.glob(os.path.join(TOON_ACTION_DIR, slug + "*.png")))
+
 def _toon_variants(slug):
     # variants are exactly "<slug>.ext" or "<slug><digits>.ext" (e.g. court2.jpg)
     # — NOT any longer word, so slug "road" never grabs "roadblock.jpg"
@@ -223,7 +241,8 @@ def _toon_variants(slug):
     return sorted(vs)
 
 def toon_available():
-    return bool(glob.glob(os.path.join(TOON_HQ_DIR, "*.png")) or
+    return bool(glob.glob(os.path.join(TOON_ACTION_DIR, "*.png")) or
+                glob.glob(os.path.join(TOON_HQ_DIR, "*.png")) or
                 glob.glob(os.path.join(TOON_DIR, "*.jpg")) or
                 glob.glob(os.path.join(TOON_DIR, "*.png")))
 
@@ -241,7 +260,15 @@ def resolve(term, i, seed=0, avoid=None, toon=False):
     # swallow a term whose specific scene DOES exist)
     slug = None
     vs = []
+    if toon:
+        for kws, sl in TOON_ACTION_MAP:
+            if any(k in s for k in kws):
+                v = _toon_action_variants(sl)
+                if v:
+                    slug = sl; vs = v; break
     for kws, sl in cat_map:
+        if vs:
+            break
         if any(k in s for k in kws):
             v = pick_variants(sl)
             if v:
