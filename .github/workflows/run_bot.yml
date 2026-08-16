@@ -21,3 +21,4 @@ jobs:
           TELEGRAMBOTTOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
           NOTIONTOKEN: ${{ secrets.NOTIONTOKEN }}
         run: python bilingual_news.py
+
