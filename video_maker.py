@@ -65,6 +65,7 @@ DEFAULT_ROT = ["court", "building", "book", "city", "office", "document"]
 # When toon mode is on, we map each b-roll term to one of these images instead of a
 # stock video clip, so the whole video is in the hand-drawn style.
 TOON_DIR = os.path.join(LIB, "toon")
+TOON_HQ_DIR = os.path.join(LIB, "toon_hq")
 TOON_MAP = [
     # order matters: most specific first, generic/process words last
     (("handcuff","arrest","raid","detain","caught","apprehend","nab"), "arrest"),
@@ -143,6 +144,32 @@ TOON_MAP = [
 TOON_ROT = ["court", "justice", "book", "steps", "documents", "investigation",
             "police", "jail", "money", "city", "office", "lawyer", "arrest",
             "family", "road", "deal", "verdict", "rights"]
+# Until every legacy scene has a rebuilt master, map unsupported topics to a
+# semantically close HQ plate. Quality stays consistent without showing a random
+# or misleading image (for example, a family scene behind a police story).
+TOON_HQ_FALLBACK = {
+    "arrest": "court", "police": "court", "station": "documents",
+    "investigation": "documents", "interrogation": "documents",
+    "signature": "documents", "charge": "court", "lawyer": "court",
+    "witness": "court", "verdict": "justice", "sentence": "judge",
+    "jail": "judge", "bail": "justice", "appeal": "court",
+    "money": "documents", "theft": "justice", "weapon": "justice",
+    "drugs": "justice", "scam": "documents", "accident": "documents",
+    "road": "city", "protest": "rights", "deal": "documents",
+    "office": "documents", "clock": "documents", "hospital": "documents",
+    "students": "book", "corruption": "justice", "immigration": "malaysia",
+    "roadblock": "city", "summons": "documents", "tenancy": "documents",
+    "marriage": "family", "inheritance": "family", "employment": "documents",
+    "syariah": "family", "customs": "malaysia", "gambling": "justice",
+    "drinkdriving": "justice", "vandalism": "justice", "cyber": "documents",
+    "defamation": "rights", "fire": "documents", "disaster": "documents",
+    "bank": "documents", "insurance": "documents", "airport": "city",
+    "cctv": "documents", "oath": "court", "mediation": "justice",
+    "seizure": "court", "debt": "documents", "custody": "family",
+    "harassment": "rights", "tax": "documents", "company": "city",
+    "election": "rights", "whistleblower": "rights", "autopsy": "documents",
+    "crimescene": "documents", "steps": "justice",
+}
 IMG_EXT = (".jpg", ".jpeg", ".png")
 
 def _is_img(p):
@@ -154,6 +181,23 @@ def _variants(slug):
 def _toon_variants(slug):
     # variants are exactly "<slug>.ext" or "<slug><digits>.ext" (e.g. court2.jpg)
     # — NOT any longer word, so slug "road" never grabs "roadblock.jpg"
+    # New PNG masters live separately and always win over the legacy compressed
+    # JPEG library. This prevents a random seed from selecting a soft duplicate.
+    def hq_variants(name):
+        found = []
+        for p in glob.glob(os.path.join(TOON_HQ_DIR, name + "*.png")):
+            rem = os.path.basename(p)[len(name):-4]
+            if rem == "" or rem.isdigit():
+                found.append(p)
+        return sorted(found)
+
+    hq = hq_variants(slug)
+    if hq:
+        return hq
+    # Once the rebuilt library exists, never fall back to the visibly softer
+    # JPEG sources. Use the closest available legal-news master instead.
+    if glob.glob(os.path.join(TOON_HQ_DIR, "*.png")):
+        return hq_variants(TOON_HQ_FALLBACK.get(slug, "justice"))
     vs = []
     for e in IMG_EXT:
         for p in glob.glob(os.path.join(TOON_DIR, slug + "*" + e)):
@@ -163,7 +207,8 @@ def _toon_variants(slug):
     return sorted(vs)
 
 def toon_available():
-    return bool(glob.glob(os.path.join(TOON_DIR, "*.jpg")) or
+    return bool(glob.glob(os.path.join(TOON_HQ_DIR, "*.png")) or
+                glob.glob(os.path.join(TOON_DIR, "*.jpg")) or
                 glob.glob(os.path.join(TOON_DIR, "*.png")))
 
 def resolve(term, i, seed=0, avoid=None, toon=False):
@@ -405,10 +450,10 @@ def render(title, script, broll_terms, out_path, progress=None, toon=None):
         dur = max(0.6, ends[i]-starts[i]); seg = os.path.join(WORK, f"s{i:02d}.mp4")
         if src and _is_img(src):   # static cartoon background
             inp = ["-loop", "1", "-i", src]
-            # Toon scenes are already authored at 1080x1920. Avoid zoompan's
-            # extra resampling and keep the original line work pixel-sharp.
+            # Scale once to the 1080x1920 render target. Avoid zoompan's repeated
+            # resampling so the high-resolution master line work stays sharp.
             vf = ("scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
-                  "crop=1080:1920,unsharp=5:5:0.58:3:3:0.0,"
+                  "crop=1080:1920,unsharp=5:5:0.34:3:3:0.0,"
                   "eq=saturation=1.04:contrast=1.03:brightness=0.012,setsar=1,fps=30")
         elif src:
             inp = ["-stream_loop", "-1", "-i", src]
@@ -422,7 +467,7 @@ def render(title, script, broll_terms, out_path, progress=None, toon=None):
             inp = ["-f", "lavfi", "-i", "color=c=0x12162e:s=1080x1920:r=30"]
             vf = "setsar=1"
         subprocess.run([FF, "-y", *inp, "-t", f"{dur:.3f}", "-vf", vf,
-            "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "15",
+            "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "slow", "-tune", "animation", "-crf", "12",
             seg, "-loglevel", "error"])
         lines.append(f"file 's{i:02d}.mp4'")
         rep(66 + 26*(i+1)/max(1, len(sentz)), "Building backgrounds")
@@ -438,7 +483,7 @@ def render(title, script, broll_terms, out_path, progress=None, toon=None):
                             "[2:a]highpass=f=75,acompressor=threshold=-18dB:ratio=3:attack=18:release=220,"
                             "loudnorm=I=-16:TP=-1.5:LRA=7[a]"),
         "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-preset", "medium", "-crf", "15", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+        "-preset", "slow", "-tune", "animation", "-crf", "12", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-movflags", "+faststart", "-shortest", out_path, "-loglevel", "error"], cwd=WORK)
     rep(100, "Done")
     return out_path
