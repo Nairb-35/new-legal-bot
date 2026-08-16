@@ -4,7 +4,7 @@ Runs on the GitHub Actions runner (called by bilingual_news.py). Uses the bundle
 `lib/` background clips (keyword-matched) so it never depends on a live stock site.
 Deps (edge-tts, imageio-ffmpeg, pillow, numpy) are installed on demand by the caller.
 """
-import asyncio, os, subprocess, re, glob
+import asyncio, os, subprocess, re, glob, secrets
 import numpy as np
 import edge_tts, imageio_ffmpeg
 from PIL import Image, ImageDraw, ImageFilter
@@ -170,6 +170,20 @@ TOON_HQ_FALLBACK = {
     "election": "rights", "whistleblower": "rights", "autopsy": "documents",
     "crimescene": "documents", "steps": "justice",
 }
+# Each HQ concept has a small pool of compatible alternatives. A fresh random
+# seed selects among them per render, so separate videos do not reuse a fixed
+# scene order while the imagery remains relevant to the narration.
+TOON_HQ_POOLS = {
+    "book": ("book", "documents", "justice"),
+    "city": ("city", "malaysia", "court"),
+    "court": ("court", "judge", "justice", "documents"),
+    "documents": ("documents", "book", "court", "justice"),
+    "family": ("family", "rights", "court"),
+    "judge": ("judge", "court", "justice"),
+    "justice": ("justice", "court", "rights", "judge"),
+    "malaysia": ("malaysia", "city", "court"),
+    "rights": ("rights", "justice", "family", "court"),
+}
 IMG_EXT = (".jpg", ".jpeg", ".png")
 
 def _is_img(p):
@@ -191,13 +205,15 @@ def _toon_variants(slug):
                 found.append(p)
         return sorted(found)
 
-    hq = hq_variants(slug)
-    if hq:
-        return hq
-    # Once the rebuilt library exists, never fall back to the visibly softer
-    # JPEG sources. Use the closest available legal-news master instead.
     if glob.glob(os.path.join(TOON_HQ_DIR, "*.png")):
-        return hq_variants(TOON_HQ_FALLBACK.get(slug, "justice"))
+        exact = hq_variants(slug)
+        concept = slug if exact else TOON_HQ_FALLBACK.get(slug, "justice")
+        pooled = []
+        for name in TOON_HQ_POOLS.get(concept, (concept,)):
+            pooled.extend(hq_variants(name))
+        # Once the rebuilt library exists, never fall back to the visibly
+        # softer JPEG sources. The pool also gives every render visual variety.
+        return sorted(set(pooled))
     vs = []
     for e in IMG_EXT:
         for p in glob.glob(os.path.join(TOON_DIR, slug + "*" + e)):
@@ -213,9 +229,9 @@ def toon_available():
 
 def resolve(term, i, seed=0, avoid=None, toon=False):
     """Map a term to a category, then pick ONE of that category's variants, varying
-    by (seed+i) so different videos/lines get different backgrounds; never repeat the
-    immediately-previous one when another variant exists. In toon mode, the variants
-    are cartoon images from lib/toon/ instead of stock video clips."""
+    by (seed+i) so different videos/lines get different backgrounds. ``avoid`` may
+    be one path or a collection of every path already used in the video. In toon
+    mode, the variants are cartoon images instead of stock video clips."""
     s = (term or "").lower()
     cat_map = TOON_MAP if toon else LIB_MAP
     pick_variants = _toon_variants if toon else _variants
@@ -236,11 +252,20 @@ def resolve(term, i, seed=0, avoid=None, toon=False):
             if vs: break
     if not vs:
         return None
+    if isinstance(avoid, (set, list, tuple)):
+        blocked = set(avoid)
+    else:
+        blocked = {avoid} if avoid else set()
+    available = [path for path in vs if path not in blocked]
+    if not available and toon and blocked:
+        # Prefer an unused HQ plate over repeating a semantic pool. Repetition
+        # is allowed only after every available master has appeared once.
+        all_hq = sorted(glob.glob(os.path.join(TOON_HQ_DIR, "*.png")))
+        available = [path for path in all_hq if path not in blocked]
+    if available:
+        vs = available
     idx = (i + seed) % len(vs)
-    pick = vs[idx]
-    if avoid and pick == avoid and len(vs) > 1:
-        pick = vs[(idx + 1) % len(vs)]
-    return pick
+    return vs[idx]
 
 # ---- voice + timing ----
 def _synth(script, audio):
@@ -438,15 +463,20 @@ def render(title, script, broll_terms, out_path, progress=None, toon=None):
     starts = [0.0] + [sentz[i][1] for i in range(1, len(sentz))]
     ends = starts[1:] + [AUD]
     terms = broll_terms or []
-    seed = sum(ord(c) for c in (script[:300] or "x")) % 89   # varies the footage picked per video
-    last = None; lines = []
+    # A cryptographically fresh seed makes the scene order independent for
+    # every render, including repeated runs of the same script.
+    seed = secrets.randbits(31)
+    last = None; used_scenes = set(); lines = []
     for i in range(len(sentz)):
         term = terms[i] if i < len(terms) else sentz[i][0]
         if toon:  # cartoon mode: bundled doodle images only (no live stock footage)
-            src = resolve(term, i, seed, avoid=last, toon=True) or last
+            src = resolve(term, i, seed, avoid=used_scenes, toon=True) or last
         else:
             src = _pexels_fetch(term, i + seed) or resolve(term, i, seed, avoid=last) or last
-        if src: last = src
+        if src:
+            last = src
+            if toon:
+                used_scenes.add(src)
         dur = max(0.6, ends[i]-starts[i]); seg = os.path.join(WORK, f"s{i:02d}.mp4")
         if src and _is_img(src):   # static cartoon background
             inp = ["-loop", "1", "-i", src]
