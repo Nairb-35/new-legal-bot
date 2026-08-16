@@ -4,7 +4,7 @@ Runs on the GitHub Actions runner (called by bilingual_news.py). Uses the bundle
 `lib/` background clips (keyword-matched) so it never depends on a live stock site.
 Deps (edge-tts, imageio-ffmpeg, pillow, numpy) are installed on demand by the caller.
 """
-import asyncio, os, subprocess, re, glob
+import asyncio, os, subprocess, re, glob, secrets
 import numpy as np
 import edge_tts, imageio_ffmpeg
 from PIL import Image, ImageDraw, ImageFilter
@@ -65,6 +65,7 @@ DEFAULT_ROT = ["court", "building", "book", "city", "office", "document"]
 # When toon mode is on, we map each b-roll term to one of these images instead of a
 # stock video clip, so the whole video is in the hand-drawn style.
 TOON_DIR = os.path.join(LIB, "toon")
+TOON_HQ_DIR = os.path.join(LIB, "toon_hq")
 TOON_MAP = [
     # order matters: most specific first, generic/process words last
     (("handcuff","arrest","raid","detain","caught","apprehend","nab"), "arrest"),
@@ -143,6 +144,46 @@ TOON_MAP = [
 TOON_ROT = ["court", "justice", "book", "steps", "documents", "investigation",
             "police", "jail", "money", "city", "office", "lawyer", "arrest",
             "family", "road", "deal", "verdict", "rights"]
+# Until every legacy scene has a rebuilt master, map unsupported topics to a
+# semantically close HQ plate. Quality stays consistent without showing a random
+# or misleading image (for example, a family scene behind a police story).
+TOON_HQ_FALLBACK = {
+    "arrest": "court", "police": "court", "station": "documents",
+    "investigation": "documents", "interrogation": "documents",
+    "signature": "documents", "charge": "court", "lawyer": "court",
+    "witness": "court", "verdict": "justice", "sentence": "judge",
+    "jail": "judge", "bail": "justice", "appeal": "court",
+    "money": "documents", "theft": "justice", "weapon": "justice",
+    "drugs": "justice", "scam": "documents", "accident": "documents",
+    "road": "city", "protest": "rights", "deal": "documents",
+    "office": "documents", "clock": "documents", "hospital": "documents",
+    "students": "book", "corruption": "justice", "immigration": "malaysia",
+    "roadblock": "city", "summons": "documents", "tenancy": "documents",
+    "marriage": "family", "inheritance": "family", "employment": "documents",
+    "syariah": "family", "customs": "malaysia", "gambling": "justice",
+    "drinkdriving": "justice", "vandalism": "justice", "cyber": "documents",
+    "defamation": "rights", "fire": "documents", "disaster": "documents",
+    "bank": "documents", "insurance": "documents", "airport": "city",
+    "cctv": "documents", "oath": "court", "mediation": "justice",
+    "seizure": "court", "debt": "documents", "custody": "family",
+    "harassment": "rights", "tax": "documents", "company": "city",
+    "election": "rights", "whistleblower": "rights", "autopsy": "documents",
+    "crimescene": "documents", "steps": "justice",
+}
+# Each HQ concept has a small pool of compatible alternatives. A fresh random
+# seed selects among them per render, so separate videos do not reuse a fixed
+# scene order while the imagery remains relevant to the narration.
+TOON_HQ_POOLS = {
+    "book": ("book", "documents", "justice"),
+    "city": ("city", "malaysia", "court"),
+    "court": ("court", "judge", "justice", "documents"),
+    "documents": ("documents", "book", "court", "justice"),
+    "family": ("family", "rights", "court"),
+    "judge": ("judge", "court", "justice"),
+    "justice": ("justice", "court", "rights", "judge"),
+    "malaysia": ("malaysia", "city", "court"),
+    "rights": ("rights", "justice", "family", "court"),
+}
 IMG_EXT = (".jpg", ".jpeg", ".png")
 
 def _is_img(p):
@@ -154,6 +195,25 @@ def _variants(slug):
 def _toon_variants(slug):
     # variants are exactly "<slug>.ext" or "<slug><digits>.ext" (e.g. court2.jpg)
     # — NOT any longer word, so slug "road" never grabs "roadblock.jpg"
+    # New PNG masters live separately and always win over the legacy compressed
+    # JPEG library. This prevents a random seed from selecting a soft duplicate.
+    def hq_variants(name):
+        found = []
+        for p in glob.glob(os.path.join(TOON_HQ_DIR, name + "*.png")):
+            rem = os.path.basename(p)[len(name):-4]
+            if rem == "" or rem.isdigit():
+                found.append(p)
+        return sorted(found)
+
+    if glob.glob(os.path.join(TOON_HQ_DIR, "*.png")):
+        exact = hq_variants(slug)
+        concept = slug if exact else TOON_HQ_FALLBACK.get(slug, "justice")
+        pooled = []
+        for name in TOON_HQ_POOLS.get(concept, (concept,)):
+            pooled.extend(hq_variants(name))
+        # Once the rebuilt library exists, never fall back to the visibly
+        # softer JPEG sources. The pool also gives every render visual variety.
+        return sorted(set(pooled))
     vs = []
     for e in IMG_EXT:
         for p in glob.glob(os.path.join(TOON_DIR, slug + "*" + e)):
@@ -163,14 +223,15 @@ def _toon_variants(slug):
     return sorted(vs)
 
 def toon_available():
-    return bool(glob.glob(os.path.join(TOON_DIR, "*.jpg")) or
+    return bool(glob.glob(os.path.join(TOON_HQ_DIR, "*.png")) or
+                glob.glob(os.path.join(TOON_DIR, "*.jpg")) or
                 glob.glob(os.path.join(TOON_DIR, "*.png")))
 
 def resolve(term, i, seed=0, avoid=None, toon=False):
     """Map a term to a category, then pick ONE of that category's variants, varying
-    by (seed+i) so different videos/lines get different backgrounds; never repeat the
-    immediately-previous one when another variant exists. In toon mode, the variants
-    are cartoon images from lib/toon/ instead of stock video clips."""
+    by (seed+i) so different videos/lines get different backgrounds. ``avoid`` may
+    be one path or a collection of every path already used in the video. In toon
+    mode, the variants are cartoon images instead of stock video clips."""
     s = (term or "").lower()
     cat_map = TOON_MAP if toon else LIB_MAP
     pick_variants = _toon_variants if toon else _variants
@@ -191,11 +252,20 @@ def resolve(term, i, seed=0, avoid=None, toon=False):
             if vs: break
     if not vs:
         return None
+    if isinstance(avoid, (set, list, tuple)):
+        blocked = set(avoid)
+    else:
+        blocked = {avoid} if avoid else set()
+    available = [path for path in vs if path not in blocked]
+    if not available and toon and blocked:
+        # Prefer an unused HQ plate over repeating a semantic pool. Repetition
+        # is allowed only after every available master has appeared once.
+        all_hq = sorted(glob.glob(os.path.join(TOON_HQ_DIR, "*.png")))
+        available = [path for path in all_hq if path not in blocked]
+    if available:
+        vs = available
     idx = (i + seed) % len(vs)
-    pick = vs[idx]
-    if avoid and pick == avoid and len(vs) > 1:
-        pick = vs[(idx + 1) % len(vs)]
-    return pick
+    return vs[idx]
 
 # ---- voice + timing ----
 def _synth(script, audio):
@@ -235,6 +305,39 @@ def _caps(sentz):
                 out.append([c, t, t + di*scale]); t += di*scale
         return out
     return asyncio.run(go())
+
+def _wrap_caption(text, width=18):
+    """Wrap a short caption into at most three balanced, mobile-safe lines."""
+    words = (text or "").split()
+    if not words:
+        return ""
+    lines, current = [], []
+    for word in words:
+        candidate = " ".join(current + [word])
+        if current and len(candidate) > width:
+            lines.append(" ".join(current)); current = [word]
+        else:
+            current.append(word)
+    if current:
+        lines.append(" ".join(current))
+    while len(lines) > 3:
+        lines[-2:] = [" ".join(lines[-2:])]
+    return r"\N".join(lines)
+
+def _caption_markup(text):
+    """Give every caption a small kinetic colour accent without changing the art."""
+    # Keep the script's punctuation: it carries meaning and makes short caption
+    # chunks read naturally instead of looking like disconnected word cards.
+    clean = re.sub(r"[{}]", "", (text or "")).strip().upper()
+    wrapped = _wrap_caption(clean)
+    words = wrapped.split()
+    if len(words) < 2:
+        return wrapped
+    # Highlight the final semantic beat in kampung-gold; reset is explicit so
+    # punctuation and following ASS events cannot inherit the colour.
+    last = words[-1]
+    prefix = " ".join(words[:-1])
+    return prefix + r" {\c&H0015CCFA&}" + last + r"{\c&H00FFFFFF&}"
 
 # ---- cartoon host ----
 def _remove_bg(path):
@@ -300,13 +403,16 @@ def render(title, script, broll_terms, out_path, progress=None, toon=None):
     for i in range(len(caps)-1): caps[i][2] = caps[i+1][1]
     caps[-1][2] = AUD
     rep(30, "Captions ready")
-    def disp(t): return t.replace("{","").replace("}","").strip().strip(",.—– ").upper()
     def tt(x):
         h=int(x//3600); mn=int(x%3600//60); s=x%60; return f"{h:d}:{mn:02d}:{s:05.2f}"
-    ev = [f"Dialogue: 0,{tt(a)},{tt(b)},Main,,0,0,0,,{disp(c)}" for c, a, b in caps]
+    ev = [f"Dialogue: 2,{tt(a)},{tt(b)},Main,,0,0,0,,{{\\fad(90,80)}}{_caption_markup(c)}"
+          for c, a, b in caps]
+    if AUD > 3:
+        ev.append(f"Dialogue: 3,{tt(max(0, AUD-2.2))},{tt(AUD)},End,,0,0,0,,{{\\fad(180,220)}}SAVE  ·  SHARE  ·  FOLLOW")
     header = ("[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n"
     "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-    "Style: Main,Arial,104,&H00FFFFFF,&H000000FF,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,1,9,3,2,70,70,780,1\n\n"
+    "Style: Main,Arial,82,&H00FFFFFF,&H000000FF,&H00181B24,&H70000000,-1,0,0,0,100,100,0,0,1,7,2,8,82,82,305,1\n"
+    "Style: End,Arial,46,&H0015CCFA,&H000000FF,&H00181B24,&H90000000,-1,0,0,0,100,100,3,0,3,2,0,2,70,70,74,1\n\n"
     "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
     open(os.path.join(WORK, "subs.ass"), "w", encoding="utf-8").write(header + "\n".join(ev) + "\n")
 
@@ -321,7 +427,7 @@ def render(title, script, broll_terms, out_path, progress=None, toon=None):
             cc, oo = cc.resize(size), oo.resize(size)
         return cc, oo
 
-    C, O = _prep_pair(os.path.join(HERE, "kampung_clean.png"), os.path.join(HERE, "kampung_open2.png"))
+    C, O = _prep_pair(os.path.join(HERE, "kampung_clean.png"), os.path.join(HERE, "kampung_open3.png"))
     HEAD_W, HEAD_H = C.size
     # Per-emotion host pairs — drop <emotion>_closed.png + <emotion>_open.png into
     # lib/emotions/ (sad, serious, angry; happy defaults to the smiling host).
@@ -345,7 +451,10 @@ def render(title, script, broll_terms, out_path, progress=None, toon=None):
     for k in range(nf):
         t = k / HFPS
         Ce, Oe = PAIRS.get(_emotion_at(t), (C, O))
-        (Oe if (speaking(t) and k % 2 == 0) else Ce).save(os.path.join(WORK, f"h{k:04d}.png"))
+        # A four-frame cycle stays natural but tracks fast captioned speech more
+        # closely than the slower five-frame version.
+        mouth_open = speaking(t) and (k % 4) in (1, 2)
+        (Oe if mouth_open else Ce).save(os.path.join(WORK, f"h{k:04d}.png"))
         if k % 12 == 0: rep(30 + 34*k/max(1, nf), "Animating host")
     subprocess.run([FF, "-y", "-framerate", str(HFPS), "-i", "h%04d.png", "-c:v", "qtrle", "head.mov",
                     "-loglevel", "error"], cwd=WORK)
@@ -354,27 +463,42 @@ def render(title, script, broll_terms, out_path, progress=None, toon=None):
     starts = [0.0] + [sentz[i][1] for i in range(1, len(sentz))]
     ends = starts[1:] + [AUD]
     terms = broll_terms or []
-    seed = sum(ord(c) for c in (script[:300] or "x")) % 89   # varies the footage picked per video
-    last = None; lines = []
+    # A cryptographically fresh seed makes the scene order independent for
+    # every render, including repeated runs of the same script.
+    seed = secrets.randbits(31)
+    last = None; used_scenes = set(); lines = []
     for i in range(len(sentz)):
         term = terms[i] if i < len(terms) else sentz[i][0]
         if toon:  # cartoon mode: bundled doodle images only (no live stock footage)
-            src = resolve(term, i, seed, avoid=last, toon=True) or last
+            src = resolve(term, i, seed, avoid=used_scenes, toon=True) or last
         else:
             src = _pexels_fetch(term, i + seed) or resolve(term, i, seed, avoid=last) or last
-        if src: last = src
+        if src:
+            last = src
+            if toon:
+                used_scenes.add(src)
         dur = max(0.6, ends[i]-starts[i]); seg = os.path.join(WORK, f"s{i:02d}.mp4")
         if src and _is_img(src):   # static cartoon background
             inp = ["-loop", "1", "-i", src]
-            vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30"
+            # Scale once to the 1080x1920 render target. Avoid zoompan's repeated
+            # resampling so the high-resolution master line work stays sharp.
+            vf = ("scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
+                  "crop=1080:1920,unsharp=5:5:0.34:3:3:0.0,"
+                  "eq=saturation=1.04:contrast=1.03:brightness=0.012,setsar=1,fps=30")
         elif src:
             inp = ["-stream_loop", "-1", "-i", src]
-            vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30"
+            phase = (i % 4) * 0.75
+            vf = ("scale=1120:1992:force_original_aspect_ratio=increase,"
+                  f"crop=1080:1920:x='(iw-ow)/2+12*sin(t*0.24+{phase})':"
+                  f"y='(ih-oh)/2+10*cos(t*0.20+{phase})',"
+                  "unsharp=5:5:0.32:3:3:0.0,"
+                  "eq=saturation=1.035:contrast=1.02:brightness=0.01,setsar=1,fps=30")
         else:  # gradient fallback (should be rare)
             inp = ["-f", "lavfi", "-i", "color=c=0x12162e:s=1080x1920:r=30"]
             vf = "setsar=1"
         subprocess.run([FF, "-y", *inp, "-t", f"{dur:.3f}", "-vf", vf,
-            "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", seg, "-loglevel", "error"])
+            "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "slow", "-tune", "animation", "-crf", "12",
+            seg, "-loglevel", "error"])
         lines.append(f"file 's{i:02d}.mp4'")
         rep(66 + 26*(i+1)/max(1, len(sentz)), "Building backgrounds")
     open(os.path.join(WORK, "list.txt"), "w").write("\n".join(lines))
@@ -385,8 +509,11 @@ def render(title, script, broll_terms, out_path, progress=None, toon=None):
     oy = 1920 - HEAD_H - 30
     rep(96, "Adding captions & audio")
     subprocess.run([FF, "-y", "-i", "bg.mp4", "-i", os.path.join(WORK, "head.mov"), "-i", audio,
-        "-filter_complex", f"[0:v][1:v]overlay=8:{oy}:shortest=1,ass=subs.ass[v]",
-        "-map", "[v]", "-map", "2:a", "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "160k", "-shortest", out_path, "-loglevel", "error"], cwd=WORK)
+        "-filter_complex", (f"[0:v][1:v]overlay=x='8+4*sin(t*2.2)':y='{oy}+5*sin(t*2.8)':shortest=1,ass=subs.ass[v];"
+                            "[2:a]highpass=f=75,acompressor=threshold=-18dB:ratio=3:attack=18:release=220,"
+                            "loudnorm=I=-16:TP=-1.5:LRA=7[a]"),
+        "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-preset", "slow", "-tune", "animation", "-crf", "12", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+        "-movflags", "+faststart", "-shortest", out_path, "-loglevel", "error"], cwd=WORK)
     rep(100, "Done")
     return out_path
