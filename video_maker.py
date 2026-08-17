@@ -204,6 +204,15 @@ IMG_EXT = (".jpg", ".jpeg", ".png")
 def _is_img(p):
     return bool(p) and p.lower().endswith(IMG_EXT)
 
+def _scene_key(path):
+    """Stable repository-relative scene ID (works on Windows and Actions/Linux)."""
+    if not path:
+        return ""
+    try:
+        return os.path.relpath(path, HERE).replace("\\", "/")
+    except Exception:
+        return os.path.basename(path)
+
 def _variants(slug):
     return sorted(glob.glob(os.path.join(LIB, slug + "*.mp4")))
 
@@ -401,7 +410,60 @@ def _emotion(text):
             return e
     return "neutral"
 
-def render(title, script, broll_terms, out_path, progress=None, toon=None):
+def _normalise_video_sequence(value):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = secrets.randbits(52)
+    return max(1, value)
+
+def _story_beat(index, total, beat_count=5):
+    """Map sentences to a small number of longer visual beats.
+
+    The reference video holds one reenactment across the facts and explanation
+    of a level. Five beats keeps that pacing while using far fewer source plates
+    than changing the background on every short sentence.
+    """
+    count = max(1, min(int(beat_count), int(total) or 1))
+    return min(count - 1, int(index) * count // max(1, int(total)))
+
+def _toon_variant_filter(video_sequence, beat_index, segment_index=0):
+    """Return a deterministic, video-specific treatment for one toon plate.
+
+    ``video_sequence`` is allocated persistently by the Telegram webhook. The
+    resulting crop, mirror direction, motion path and colour treatment therefore
+    cannot be identical between separately queued videos, even after the finite
+    source-art library eventually cycles. All operations are native FFmpeg and
+    free; no per-video image API is involved.
+    """
+    seq = _normalise_video_sequence(video_sequence)
+    mix = (seq * 1103515245 + (int(beat_index) + 1) * 12345) & 0x7fffffff
+    scale_pct = 108 + (mix % 7)                       # 108% .. 114%
+    sw = (1080 * scale_pct // 100) // 2 * 2
+    sh = (1920 * scale_pct // 100) // 2 * 2
+    x_mid = 0.30 + ((mix >> 4) % 401) / 1000.0       # 0.30 .. 0.70
+    y_mid = 0.32 + ((mix >> 13) % 361) / 1000.0      # 0.32 .. 0.68
+    x_amp = 0.10 + ((mix >> 21) % 81) / 1000.0       # 0.10 .. 0.18
+    y_amp = 0.07 + ((mix >> 8) % 61) / 1000.0        # 0.07 .. 0.13
+    phase = ((mix % 6283) / 1000.0) + int(segment_index) * 0.71
+    direction = -1.0 if (mix & 2) else 1.0
+    hue = -5.0 + ((mix >> 6) % 1001) / 100.0         # subtle -5° .. +5°
+    sat = 1.01 + ((mix >> 17) % 60) / 1000.0         # 1.01 .. 1.069
+    contrast = 1.02 + ((mix >> 11) % 31) / 1000.0    # 1.02 .. 1.05
+    brightness = 0.004 + ((mix >> 23) % 13) / 1000.0
+    flip = "hflip," if (mix & 1) else ""
+    x_delta = direction * x_amp
+    x_expr = f"(iw-ow)*({x_mid:.3f}{x_delta:+.3f}*sin(t*0.19+{phase:.3f}))"
+    y_expr = f"(ih-oh)*({y_mid:.3f}+{y_amp:.3f}*cos(t*0.16+{phase:.3f}))"
+    return (f"{flip}scale={sw}:{sh}:flags=lanczos,"
+            f"crop=1080:1920:x='{x_expr}':y='{y_expr}',"
+            f"hue=h={hue:.2f}:s={sat:.3f},"
+            "unsharp=5:5:0.34:3:3:0.0,"
+            f"eq=contrast={contrast:.3f}:brightness={brightness:.3f},"
+            "setsar=1,fps=30")
+
+def render(title, script, broll_terms, out_path, progress=None, toon=None,
+           video_sequence=None, avoid_backgrounds=None, scene_usage=None):
     def rep(p, label=""):
         if progress:
             try: progress(int(p), label)
@@ -490,28 +552,52 @@ def render(title, script, broll_terms, out_path, progress=None, toon=None):
     starts = [0.0] + [sentz[i][1] for i in range(1, len(sentz))]
     ends = starts[1:] + [AUD]
     terms = broll_terms or []
-    # A cryptographically fresh seed makes the scene order independent for
-    # every render, including repeated runs of the same script.
-    seed = secrets.randbits(31)
+    sequence = _normalise_video_sequence(video_sequence)
+    # The persistent sequence drives both source selection and visual treatment.
+    # Unlike a random seed, it cannot accidentally reproduce an earlier job.
+    seed = (sequence * 2654435761) & 0x7fffffff
+    prior_keys = {str(x).replace("\\", "/") for x in (avoid_backgrounds or []) if x}
+    candidate_paths = (glob.glob(os.path.join(TOON_ACTION_DIR, "*.png")) +
+                       glob.glob(os.path.join(TOON_HQ_DIR, "*.png")))
+    prior_scenes = {p for p in candidate_paths if _scene_key(p) in prior_keys}
     last = None; used_scenes = set(); lines = []
+
+    beat_count = min(5, len(sentz)) if toon else len(sentz)
+    beat_sources = {}
+    if toon:
+        # Select one relevant plate for each story beat. Combining the b-roll
+        # terms in a beat lets a concrete action (for example "one punch") win
+        # over a nearby generic legal-analysis term.
+        for beat in range(beat_count):
+            members = [j for j in range(len(sentz))
+                       if _story_beat(j, len(sentz), beat_count) == beat]
+            combined = " ".join(
+                (terms[j] if j < len(terms) else sentz[j][0]) for j in members
+            )
+            blocked = prior_scenes | used_scenes
+            src = resolve(combined, beat, seed, avoid=blocked, toon=True) or last
+            if src:
+                last = src
+                used_scenes.add(src)
+            beat_sources[beat] = src
+
+        if scene_usage is not None:
+            scene_usage[:] = sorted(_scene_key(p) for p in used_scenes if p)
+
     for i in range(len(sentz)):
         term = terms[i] if i < len(terms) else sentz[i][0]
         if toon:  # cartoon mode: bundled doodle images only (no live stock footage)
-            src = resolve(term, i, seed, avoid=used_scenes, toon=True) or last
+            beat = _story_beat(i, len(sentz), beat_count)
+            src = beat_sources.get(beat) or last
         else:
             src = _pexels_fetch(term, i + seed) or resolve(term, i, seed, avoid=last) or last
         if src:
             last = src
-            if toon:
-                used_scenes.add(src)
         dur = max(0.6, ends[i]-starts[i]); seg = os.path.join(WORK, f"s{i:02d}.mp4")
         if src and _is_img(src):   # static cartoon background
             inp = ["-loop", "1", "-i", src]
-            # Scale once to the 1080x1920 render target. Avoid zoompan's repeated
-            # resampling so the high-resolution master line work stays sharp.
-            vf = ("scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
-                  "crop=1080:1920,unsharp=5:5:0.34:3:3:0.0,"
-                  "eq=saturation=1.04:contrast=1.03:brightness=0.012,setsar=1,fps=30")
+            beat = _story_beat(i, len(sentz), beat_count)
+            vf = _toon_variant_filter(sequence, beat, i)
         elif src:
             inp = ["-stream_loop", "-1", "-i", src]
             phase = (i % 4) * 0.75

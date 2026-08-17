@@ -825,6 +825,66 @@ def _gh_token():
     return _GH_TOK
 
 
+def _record_background_usage(video_sequence, sources):
+    """Persist the completed video's source plates for the next queued job.
+
+    The webhook copies this list into the following job as an exclusion set, so
+    consecutive Telegram videos never use the same source illustration. Updates
+    use GitHub's blob SHA for optimistic concurrency and preserve newer sequence
+    reservations if a webhook writes the file while rendering is in progress.
+    """
+    if not video_sequence or not sources:
+        return False
+    token = BOT_GH_TOKEN or _gh_token()
+    if not token:
+        print("background history: no GitHub token; sequence transform still active")
+        return False
+    import base64
+    url = f"https://api.github.com/repos/{BOT_REPO}/contents/background_state.json"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "lawbot",
+    }
+    try:
+        sequence = int(video_sequence)
+    except (TypeError, ValueError):
+        return False
+    for _ in range(4):
+        sha = None; state = {}
+        try:
+            got = requests.get(url + "?ref=main", headers=headers, timeout=12)
+            if got.status_code == 200:
+                item = got.json(); sha = item.get("sha")
+                state = json.loads(base64.b64decode(item.get("content", "")).decode("utf-8"))
+        except Exception:
+            state = {}
+        if int(state.get("last_completed_sequence") or 0) > sequence:
+            return True
+        state.update({
+            "next_sequence": max(int(state.get("next_sequence") or 1), sequence + 1),
+            "last_completed_sequence": sequence,
+            "last_sources": sorted({str(x).replace("\\", "/") for x in sources if x}),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        body = {
+            "message": "record video backgrounds",
+            "content": base64.b64encode(json.dumps(state, separators=(",", ":")).encode("utf-8")).decode("ascii"),
+            "branch": "main",
+        }
+        if sha:
+            body["sha"] = sha
+        try:
+            put = requests.put(url, headers=headers, json=body, timeout=15)
+            if put.status_code in (200, 201):
+                return True
+        except Exception:
+            pass
+    print("background history: GitHub update failed after retries")
+    return False
+
+
 def _flag_exists(name):
     try:
         hdr = {"Accept": "application/vnd.github+json", "User-Agent": "lawbot"}
@@ -858,7 +918,9 @@ def _toon_on():
     return False
 
 
-def render_and_send(chat_id, title, script, broll, reply_to=None, mid=None, cancel_id=None, thread=None, toon=None):
+def render_and_send(chat_id, title, script, broll, reply_to=None, mid=None,
+                    cancel_id=None, thread=None, toon=None, video_sequence=None,
+                    avoid_backgrounds=None):
     """Render the video and send it, editing a live % progress message. If `mid`
     is given (a status message the webhook already posted) we edit that one so it
     updates instantly; otherwise we create it. If `cancel_id` is given we abort
@@ -907,7 +969,14 @@ def render_and_send(chat_id, title, script, broll, reply_to=None, mid=None, canc
         import video_maker
         out = os.path.join(os.getcwd(), "ai_short.mp4")
         use_toon = _toon_on() if toon is None else toon
-        video_maker.render(title or "Malaysian Law", script, broll, out, progress=on_progress, toon=use_toon)
+        used_backgrounds = []
+        video_maker.render(title or "Malaysian Law", script, broll, out,
+                           progress=on_progress, toon=use_toon,
+                           video_sequence=video_sequence,
+                           avoid_backgrounds=avoid_backgrounds,
+                           scene_usage=used_backgrounds)
+        if use_toon:
+            _record_background_usage(video_sequence, used_backgrounds)
         _edit(chat_id, mid, f"✅ <b>Video ready</b> for “{lab}” — uploading… 📤")
         res = _send_video(chat_id, out,
                           caption=f"🎬 <b>{lab}</b>\nYour AI law short — ready to post! 😄",
@@ -958,6 +1027,8 @@ def run_pending_job():
     t = job.get("type"); chat = job.get("chat_id")
     pmid = job.get("progress_msg_id"); reply = job.get("reply_to")
     thread = job.get("message_thread_id")
+    video_sequence = job.get("background_sequence")
+    avoid_backgrounds = job.get("avoid_backgrounds") or []
     try:
         if t == "render":
             payload = _fetch_render_block(job.get("page_id"))
@@ -966,14 +1037,17 @@ def run_pending_job():
             title, script, broll = _parse_render_block(payload)
             if not script:
                 _edit(chat, pmid, "⚠️ No script found to render."); return True
-            render_and_send(chat, title, script, broll, reply_to=reply, mid=pmid, cancel_id=pmid, thread=thread)
+            render_and_send(chat, title, script, broll, reply_to=reply, mid=pmid,
+                            cancel_id=pmid, thread=thread, video_sequence=video_sequence,
+                            avoid_backgrounds=avoid_backgrounds)
         elif t == "vtest":
             render_and_send(chat, "Test video",
                             "Here's a quick test of the AI video maker. It builds the voice, the captions, "
                             "and the cartoon host on real backgrounds. If you can see this, everything works. "
                             "Follow for more Malaysian law, made simple.",
                             ["courtroom gavel", "parliament building", "law book pages", "kuala lumpur skyline"],
-                            reply_to=reply, mid=pmid, cancel_id=pmid, thread=thread)
+                            reply_to=reply, mid=pmid, cancel_id=pmid, thread=thread,
+                            video_sequence=video_sequence, avoid_backgrounds=avoid_backgrounds)
         elif t == "explain":
             topic = job.get("topic") or "Malaysian law"
             _edit(chat, pmid, f"📚 <b>Making explainer:</b> {topic[:60]}\n\n░░░░░░░░░░  0%\n<i>Writing an accurate, grounded script…</i>")
@@ -982,7 +1056,8 @@ def run_pending_job():
                 _edit(chat, pmid, f"⚠️ Couldn't write an accurate script for “{topic[:60]}”. Try rephrasing the topic.")
                 return True
             render_and_send(chat, data.get("title") or topic, data["script"], data.get("broll") or [],
-                            reply_to=reply, mid=pmid, cancel_id=pmid, thread=thread)
+                            reply_to=reply, mid=pmid, cancel_id=pmid, thread=thread,
+                            video_sequence=video_sequence, avoid_backgrounds=avoid_backgrounds)
         elif t == "news":
             posted = fetch_and_post_news(minutes_window=1440)
             if chat and not posted:
