@@ -60,6 +60,48 @@ async function ghDelete(path) {
     await fetch(url, { method: 'DELETE', headers: ghHeaders, body: JSON.stringify({ message: 'rm ' + path, sha, branch: 'main' }) });
   } catch (e) {}
 }
+
+// Reserve a monotonically increasing ID for each video. The ID is persisted in
+// GitHub, so it survives Vercel deployments and separate Actions runners. The
+// renderer uses it to build a distinct crop, direction, motion path and colour
+// treatment for every background without a paid image-generation service.
+async function claimBackgroundSequence() {
+  const path = 'background_state.json';
+  const url = `https://api.github.com/repos/${REPO}/contents/${path}`;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    let sha, state = {};
+    try {
+      const g = await fetch(url + '?ref=main', { headers: ghHeaders });
+      if (g.ok) {
+        const j = await g.json();
+        sha = j.sha;
+        state = JSON.parse(Buffer.from(j.content, 'base64').toString('utf-8')) || {};
+      }
+    } catch (e) {}
+    const sequence = Math.max(1, Number(state.next_sequence) || 1);
+    const avoid_sources = Array.isArray(state.last_sources) ? state.last_sources.slice(0, 10) : [];
+    const next = {
+      next_sequence: sequence + 1,
+      last_issued_sequence: sequence,
+      last_completed_sequence: Number(state.last_completed_sequence) || 0,
+      last_sources: avoid_sources,
+      updated_at: new Date().toISOString(),
+    };
+    const body = {
+      message: 'reserve background sequence',
+      content: Buffer.from(JSON.stringify(next)).toString('base64'),
+      branch: 'main',
+    };
+    if (sha) body.sha = sha;
+    try {
+      const put = await fetch(url, { method: 'PUT', headers: ghHeaders, body: JSON.stringify(body) });
+      if (put.ok) return { sequence, avoid_sources };
+    } catch (e) {}
+  }
+  // A timestamp is still unique if GitHub is temporarily unavailable. It is
+  // deliberately not random, so a rendered video remains reproducible.
+  return { sequence: Date.now(), avoid_sources: [] };
+}
 // Pause+Cancel controls under the progress message (Pause flips to Resume when paused).
 function ctrlKb(pmid, paused) {
   return { inline_keyboard: [[
@@ -118,7 +160,10 @@ async function startVideo(chat, replyTo, pageId, isVtest) {
     });
   }
   const ts = Math.floor(Date.now() / 1000);
-  const base = { chat_id: target, message_thread_id: thread || null, progress_msg_id: pmid, reply_to: reply || null, ts };
+  const background = await claimBackgroundSequence();
+  const base = { chat_id: target, message_thread_id: thread || null, progress_msg_id: pmid,
+    reply_to: reply || null, background_sequence: background.sequence,
+    avoid_backgrounds: background.avoid_sources, ts };
   const job = isVtest ? { type: 'vtest', ...base } : { type: 'render', page_id: pageId, ...base };
   await ghPut('job.json', job, 'queue video job');
   await ghDispatch();
@@ -141,8 +186,10 @@ async function startExplain(chat, replyTo, topic) {
       reply_markup: ctrlKb(pmid, false) });
   }
   const ts = Math.floor(Date.now() / 1000);
+  const background = await claimBackgroundSequence();
   await ghPut('job.json', { type: 'explain', topic, chat_id: target, message_thread_id: thread || null,
-    progress_msg_id: pmid, reply_to: reply || null, ts }, 'queue explainer job');
+    progress_msg_id: pmid, reply_to: reply || null, background_sequence: background.sequence,
+    avoid_backgrounds: background.avoid_sources, ts }, 'queue explainer job');
   await ghDispatch();
 }
 
