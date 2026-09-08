@@ -30,15 +30,28 @@ NEWS_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "newscfg.json")
 NOTION_DATABASE_ID = "3b0ffaadad14803f8aa7e473024f8cb7"
 NOTION_DATABASE_URL = f"https://www.notion.so/{NOTION_DATABASE_ID}"
 
-# Clean Google News RSS feed for Malaysian legal & political news.
-LOCAL_FEED_URL = (
-    "https://news.google.com/rss/search?q=(Malaysia+OR+Malaysian)+"
-    "(law+OR+court+OR+parliament+OR+judgment+OR+bill+OR+police+OR+investigation+"
-    "OR+charge+OR+policy+OR+politics+OR+minister+OR+cabinet+OR+election)+"
-    "site:thestar.com.my+OR+site:freemalaysiatoday.com+OR+site:bharian.com.my+"
-    "OR+site:nst.com.my+OR+site:theedgemalaysia.com+OR+site:sinarharian.com.my"
-    "&hl=en-MY&gl=MY&ceid=MY:en"
+# Several focused Google News RSS searches are more complete than one long
+# query. They remain free, cover English and Malay reporting, and include both
+# large national publishers and specialist legal/business outlets.
+_GOOGLE_NEWS_MY = "https://news.google.com/rss/search?hl=en-MY&gl=MY&ceid=MY:en&q="
+_LOCAL_CONTEXT = (
+    "(Malaysia OR Malaysian OR Putrajaya OR Kuala Lumpur OR MACC OR SPRM OR "
+    "Dewan Rakyat OR Parliament Malaysia)"
 )
+_LOCAL_SOURCES = (
+    "(site:thestar.com.my OR site:freemalaysiatoday.com OR site:nst.com.my OR "
+    "site:malaymail.com OR site:bernama.com OR site:theedgemalaysia.com OR "
+    "site:malaysiakini.com OR site:thevibes.com OR site:astroawani.com OR "
+    "site:channelnewsasia.com OR site:themalaysianreserve.com)"
+)
+LOCAL_FEED_URLS = [
+    _GOOGLE_NEWS_MY + _LOCAL_CONTEXT + " (court OR judge OR lawsuit OR appeal OR judgment OR sentence OR charged OR arrested OR police OR investigation OR inquest OR corruption) " + _LOCAL_SOURCES,
+    _GOOGLE_NEWS_MY + _LOCAL_CONTEXT + " (law OR bill OR parliament OR constitution OR regulation OR policy OR rights OR election OR cabinet OR minister) " + _LOCAL_SOURCES,
+    _GOOGLE_NEWS_MY + "(Malaysia OR Putrajaya OR SPRM OR Parlimen) (mahkamah OR undang-undang OR RUU OR pertuduhan OR rayuan OR siasatan OR rasuah OR polis OR hak) (site:bernama.com OR site:bharian.com.my OR site:sinarharian.com.my OR site:astroawani.com OR site:malaysiakini.com)",
+]
+
+# Backwards-compatible singular name for integrations and older tests.
+LOCAL_FEED_URL = LOCAL_FEED_URLS[0]
 
 # Free international legal-news feed. Keeping it separate from the Malaysian
 # feed makes routing deterministic instead of guessing from a mixed headline.
@@ -76,7 +89,12 @@ def is_genuinely_legal_or_political(title, summary):
         r'court', r'law', r'parliament', r'judge', r'bill', r'policy',
         r'attorney general', r'constitution', r'legal', r'prosecutor', r'verdict',
         r'statute', r'judicial', r'amendment', r'bar council', r'tribunal', r'police',
-        r'investigation', r'politics', r'political', r'minister', r'cabinet', r'election'
+        r'investigation', r'politics', r'political', r'minister', r'cabinet', r'election',
+        r'lawsuit', r'appeal', r'judgment', r'conviction', r'sentenc', r'arrest',
+        r'charged?', r'regulat', r'rights?', r'inquest', r'corruption', r'macc',
+        r'enforcement', r'ordinance', r'gazette', r'royal commission',
+        r'mahkamah', r'undang-undang', r'parlimen', r'pertuduhan', r'rayuan',
+        r'siasatan', r'rasuah', r'polis', r'perlembagaan', r'pilihan raya', r'\bruu\b'
     ]
     return any(re.search(kw, text) for kw in keywords)
 
@@ -611,15 +629,14 @@ def send_news_message(title_en, title_bm, published_str, importance_stars, notio
 # ---------------------------------------------------------------------------
 # Main news pipeline
 # ---------------------------------------------------------------------------
-def fetch_and_post_news(minutes_window=1440, max_posts=8):
+def fetch_and_post_news(minutes_window=1440, max_posts=12, local_max_posts=8,
+                        international_max_posts=4):
     translator = GoogleTranslator(source='en', target='ms')
     now = datetime.now(timezone.utc)
     posted_count = 0
     seen_this_run = set()  # guards against duplicates WITHIN a single run
-    feeds = [
-        ("local", feedparser.parse(LOCAL_FEED_URL)),
-        ("international", feedparser.parse(INTERNATIONAL_FEED_URL)),
-    ]
+    feeds = [("local", feedparser.parse(url)) for url in LOCAL_FEED_URLS]
+    feeds.append(("international", feedparser.parse(INTERNATIONAL_FEED_URL)))
     # Interleave the two feeds so a busy Malaysian cycle cannot consume the
     # whole per-run cap before international stories get a chance to post.
     entries = []
@@ -629,9 +646,16 @@ def fetch_and_post_news(minutes_window=1440, max_posts=8):
             if index < len(feed.entries):
                 entries.append((section, feed.entries[index]))
     print("Entries fetched: " + ", ".join(f"{section}={len(feed.entries)}" for section, feed in feeds))
+    section_limits = {
+        "local": local_max_posts,
+        "international": international_max_posts,
+    }
+    section_counts = {"local": 0, "international": 0}
 
     for section, entry in entries:
         try:
+            if section_counts[section] >= section_limits[section]:
+                continue
             title_en = (entry.title or "").strip()
             summary = getattr(entry, 'summary', '')
             link = entry.link
@@ -685,6 +709,7 @@ def fetch_and_post_news(minutes_window=1440, max_posts=8):
             send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link,
                               analysis, video_url, section=section)
             posted_count += 1
+            section_counts[section] += 1
             time.sleep(1)  # be gentle with Telegram rate limits
             if posted_count >= max_posts:
                 break  # cap per run so a backlog trickles in over runs, not a flood
@@ -692,7 +717,8 @@ def fetch_and_post_news(minutes_window=1440, max_posts=8):
         except Exception as _e:
             print(f"Skipping one article due to error: {_e}")
             continue
-    print(f"Posted {posted_count} new article(s).")
+    print(f"Posted {posted_count} new article(s): local={section_counts['local']}, "
+          f"international={section_counts['international']}.")
     return posted_count
 
 

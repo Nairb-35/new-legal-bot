@@ -21,6 +21,24 @@ import bilingual_news as bot
 
 
 class NewsTopicRoutingTests(unittest.TestCase):
+    def test_local_coverage_uses_multiple_bilingual_feeds(self):
+        self.assertGreaterEqual(len(bot.LOCAL_FEED_URLS), 3)
+        combined = " ".join(bot.LOCAL_FEED_URLS).lower()
+        self.assertIn("bernama.com", combined)
+        self.assertIn("malaymail.com", combined)
+        self.assertIn("mahkamah", combined)
+
+    def test_expanded_legal_terms_are_kept(self):
+        examples = [
+            "Federal Court allows appeal in constitutional lawsuit",
+            "SPRM siasatan rasuah diteruskan",
+            "Coroner opens inquest after custody death",
+            "Regulator gazettes new consumer rights rules",
+        ]
+        for title in examples:
+            with self.subTest(title=title):
+                self.assertTrue(bot.is_genuinely_legal_or_political(title, ""))
+
     def test_missing_config_falls_back_to_general(self):
         with mock.patch.object(bot, "NEWS_CONFIG_FILE", os.path.join(tempfile.gettempdir(), "missing-newscfg.json")):
             self.assertIsNone(bot.news_thread_id("local"))
