@@ -316,6 +316,20 @@ module.exports = async (req, res) => {
           await tg('sendMessage', { chat_id: chat,
             text: '⚠️ Couldn\'t finish setting up the news topics: ' + failed + '\nMake sure I am an admin with Manage Topics, then send /setupnews again.' });
         }
+      } else if (low.startsWith('/hidegeneral')) {
+        // Telegram does not allow deleting its built-in General topic. Hiding
+        // is the supported equivalent and preserves its history for recovery.
+        const r = await tg('hideGeneralForumTopic', { chat_id: chat });
+        const cfg = (await ghGetJson('newscfg.json')) || {};
+        const destination = cfg.local_thread_id || msg.message_thread_id;
+        if (r && r.ok) {
+          await tg('sendMessage', { chat_id: chat, message_thread_id: destination,
+            text: '✅ General is hidden. New articles continue in Local News and International News.' });
+        } else {
+          const desc = (r && r.description) || 'unknown error';
+          await tg('sendMessage', { chat_id: chat, message_thread_id: destination,
+            text: '⚠️ Couldn\'t hide General: ' + desc });
+        }
       } else if (low.startsWith('/explain')) {
         const sp = text.indexOf(' ');
         const topic = sp > 0 ? text.slice(sp + 1).trim() : '';
@@ -340,7 +354,7 @@ module.exports = async (req, res) => {
         await ghPut('job.json', { type: 'news', chat_id: chat, ts: Math.floor(Date.now() / 1000) }, 'news job');
         await ghDispatch();
       } else if (low.startsWith('/help') || low.startsWith('/start')) {
-        await tg('sendMessage', { chat_id: chat, text: '⚖️ Legal News Bot\n/news — latest news now\n/setupnews — split local and international news into topics\n/vtest — test the AI video maker\n/explain <topic> — explainer video\n/toon on|off — cartoon vs real-footage style' });
+        await tg('sendMessage', { chat_id: chat, text: '⚖️ Legal News Bot\n/news — latest news now\n/setupnews — split local and international news into topics\n/hidegeneral — hide the built-in General topic\n/vtest — test the AI video maker\n/explain <topic> — explainer video\n/toon on|off — cartoon vs real-footage style' });
       } else if (low.startsWith('/id')) {
         const tid = msg.message_thread_id;
         await tg('sendMessage', {
