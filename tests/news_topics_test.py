@@ -28,6 +28,11 @@ class NewsTopicRoutingTests(unittest.TestCase):
         self.assertIn("malaymail.com", combined)
         self.assertIn("mahkamah", combined)
 
+    def test_feed_urls_are_http_safe(self):
+        for url in bot.LOCAL_FEED_URLS + [bot.INTERNATIONAL_FEED_URL]:
+            with self.subTest(url=url):
+                self.assertNotRegex(url, r"[\x00-\x20]")
+
     def test_expanded_legal_terms_are_kept(self):
         examples = [
             "Federal Court allows appeal in constitutional lawsuit",

@@ -7,6 +7,7 @@ import sys
 import json
 import subprocess
 import threading
+from urllib.parse import quote_plus
 from datetime import datetime, timezone, timedelta
 from deep_translator import GoogleTranslator
 
@@ -34,6 +35,13 @@ NOTION_DATABASE_URL = f"https://www.notion.so/{NOTION_DATABASE_ID}"
 # query. They remain free, cover English and Malay reporting, and include both
 # large national publishers and specialist legal/business outlets.
 _GOOGLE_NEWS_MY = "https://news.google.com/rss/search?hl=en-MY&gl=MY&ceid=MY:en&q="
+
+
+def _google_news_my(query):
+    """Build an HTTP-safe Google News RSS URL from a readable query."""
+    return _GOOGLE_NEWS_MY + quote_plus(query)
+
+
 _LOCAL_CONTEXT = (
     "(Malaysia OR Malaysian OR Putrajaya OR Kuala Lumpur OR MACC OR SPRM OR "
     "Dewan Rakyat OR Parliament Malaysia)"
@@ -45,9 +53,9 @@ _LOCAL_SOURCES = (
     "site:channelnewsasia.com OR site:themalaysianreserve.com)"
 )
 LOCAL_FEED_URLS = [
-    _GOOGLE_NEWS_MY + _LOCAL_CONTEXT + " (court OR judge OR lawsuit OR appeal OR judgment OR sentence OR charged OR arrested OR police OR investigation OR inquest OR corruption) " + _LOCAL_SOURCES,
-    _GOOGLE_NEWS_MY + _LOCAL_CONTEXT + " (law OR bill OR parliament OR constitution OR regulation OR policy OR rights OR election OR cabinet OR minister) " + _LOCAL_SOURCES,
-    _GOOGLE_NEWS_MY + "(Malaysia OR Putrajaya OR SPRM OR Parlimen) (mahkamah OR undang-undang OR RUU OR pertuduhan OR rayuan OR siasatan OR rasuah OR polis OR hak) (site:bernama.com OR site:bharian.com.my OR site:sinarharian.com.my OR site:astroawani.com OR site:malaysiakini.com)",
+    _google_news_my(_LOCAL_CONTEXT + " (court OR judge OR lawsuit OR appeal OR judgment OR sentence OR charged OR arrested OR police OR investigation OR inquest OR corruption) " + _LOCAL_SOURCES),
+    _google_news_my(_LOCAL_CONTEXT + " (law OR bill OR parliament OR constitution OR regulation OR policy OR rights OR election OR cabinet OR minister) " + _LOCAL_SOURCES),
+    _google_news_my("(Malaysia OR Putrajaya OR SPRM OR Parlimen) (mahkamah OR undang-undang OR RUU OR pertuduhan OR rayuan OR siasatan OR rasuah OR polis OR hak) (site:bernama.com OR site:bharian.com.my OR site:sinarharian.com.my OR site:astroawani.com OR site:malaysiakini.com)"),
 ]
 
 # Backwards-compatible singular name for integrations and older tests.
