@@ -286,6 +286,36 @@ module.exports = async (req, res) => {
           const desc = (r && r.description) || 'unknown error';
           await tg('sendMessage', { chat_id: chat, text: '⚠️ Couldn\'t create the topic: ' + desc + '\nMake sure Topics is ON and I am an admin with Manage Topics, then retry /setupexplainers.' });
         }
+      } else if (low.startsWith('/setupnews')) {
+        // Idempotently create and remember separate destinations for the two
+        // news feeds. Saving after each creation prevents duplicate topics if
+        // Telegram or GitHub briefly fails halfway through setup.
+        const cfg = (await ghGetJson('newscfg.json')) || {};
+        const specs = [
+          ['local_thread_id', '🇲🇾 Local News'],
+          ['international_thread_id', '🌍 International News'],
+        ];
+        let failed = null;
+        for (const [key, name] of specs) {
+          if (cfg[key]) continue;
+          const r = await tg('createForumTopic', { chat_id: chat, name });
+          if (!(r && r.ok && r.result && r.result.message_thread_id)) {
+            failed = (r && r.description) || 'unknown error';
+            break;
+          }
+          cfg.chat_id = chat;
+          cfg[key] = r.result.message_thread_id;
+          await ghPut('newscfg.json', cfg, 'set news topic destination');
+        }
+        if (!failed && cfg.local_thread_id && cfg.international_thread_id) {
+          await tg('sendMessage', { chat_id: chat, message_thread_id: cfg.local_thread_id,
+            text: '✅ Malaysian legal news will be posted here.' });
+          await tg('sendMessage', { chat_id: chat, message_thread_id: cfg.international_thread_id,
+            text: '✅ International legal news will be posted here.' });
+        } else {
+          await tg('sendMessage', { chat_id: chat,
+            text: '⚠️ Couldn\'t finish setting up the news topics: ' + failed + '\nMake sure I am an admin with Manage Topics, then send /setupnews again.' });
+        }
       } else if (low.startsWith('/explain')) {
         const sp = text.indexOf(' ');
         const topic = sp > 0 ? text.slice(sp + 1).trim() : '';
@@ -310,7 +340,7 @@ module.exports = async (req, res) => {
         await ghPut('job.json', { type: 'news', chat_id: chat, ts: Math.floor(Date.now() / 1000) }, 'news job');
         await ghDispatch();
       } else if (low.startsWith('/help') || low.startsWith('/start')) {
-        await tg('sendMessage', { chat_id: chat, text: '⚖️ Legal News Bot\n/news — latest news now\n/vtest — test the AI video maker\n/explain <topic> — explainer video\n/toon on|off — cartoon vs real-footage style' });
+        await tg('sendMessage', { chat_id: chat, text: '⚖️ Legal News Bot\n/news — latest news now\n/setupnews — split local and international news into topics\n/vtest — test the AI video maker\n/explain <topic> — explainer video\n/toon on|off — cartoon vs real-footage style' });
       } else if (low.startsWith('/id')) {
         const tid = msg.message_thread_id;
         await tg('sendMessage', {

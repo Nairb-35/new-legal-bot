@@ -23,6 +23,7 @@ BOT_REPO = "Nairb-35/new-legal-bot"
 BOT_GH_TOKEN = os.getenv("BOT_GH_TOKEN")  # PAT (Actions secret): lets a dispatched run clear its job file
 
 TELEGRAM_CHAT_ID = "-1004348673663"
+NEWS_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "newscfg.json")
 # Correct 32-char database id (the old one was missing a character, so every
 # Notion save 404'd — which caused BOTH the repeated news and the broken
 # "page couldn't be found" LENS/Video buttons).
@@ -30,7 +31,7 @@ NOTION_DATABASE_ID = "3b0ffaadad14803f8aa7e473024f8cb7"
 NOTION_DATABASE_URL = f"https://www.notion.so/{NOTION_DATABASE_ID}"
 
 # Clean Google News RSS feed for Malaysian legal & political news.
-FEED_URL = (
+LOCAL_FEED_URL = (
     "https://news.google.com/rss/search?q=(Malaysia+OR+Malaysian)+"
     "(law+OR+court+OR+parliament+OR+judgment+OR+bill+OR+police+OR+investigation+"
     "OR+charge+OR+policy+OR+politics+OR+minister+OR+cabinet+OR+election)+"
@@ -38,6 +39,18 @@ FEED_URL = (
     "OR+site:nst.com.my+OR+site:theedgemalaysia.com+OR+site:sinarharian.com.my"
     "&hl=en-MY&gl=MY&ceid=MY:en"
 )
+
+# Free international legal-news feed. Keeping it separate from the Malaysian
+# feed makes routing deterministic instead of guessing from a mixed headline.
+INTERNATIONAL_FEED_URL = (
+    "https://news.google.com/rss/search?q=(international+OR+global+OR+world)+"
+    "(law+OR+court+OR+supreme+court+OR+parliament+OR+judgment+OR+bill+OR+policy+"
+    "OR+human+rights+OR+regulation)+(site:reuters.com+OR+site:apnews.com+OR+site:bbc.com)"
+    "&hl=en-US&gl=US&ceid=US:en"
+)
+
+# Backwards-compatible name for anything importing the old constant.
+FEED_URL = LOCAL_FEED_URL
 
 NOTION_HEADERS = {
     "Authorization": f"Bearer {(NOTION_TOKEN or '').strip()}",
@@ -99,6 +112,24 @@ def tg(method, payload=None, params=None):
         return requests.post(url, json=payload, params=params, timeout=60)
     except Exception as e:
         print("Telegram error:", method, e)
+        return None
+
+
+def load_news_topics():
+    """Return saved Telegram topic ids; malformed/missing config means General."""
+    try:
+        with open(NEWS_CONFIG_FILE, "r", encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        return cfg if isinstance(cfg, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def news_thread_id(section):
+    value = load_news_topics().get(f"{section}_thread_id")
+    try:
+        return int(value) if value else None
+    except (TypeError, ValueError):
         return None
 
 
@@ -509,7 +540,8 @@ def _esc(t):
     return str(t or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link, analysis=None, video_url=None):
+def send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link,
+                      analysis=None, video_url=None, section="local"):
     # Progressive disclosure: the concise 2-3 min read lives in the Telegram
     # message itself (snapshot + lens + 60-second read + ratings); the buttons
     # deep-link to the full Notion page for interview prep / video / deep analysis.
@@ -561,13 +593,17 @@ def send_news_message(title_en, title_bm, published_str, importance_stars, notio
         kb.append([{"text": "🎥 Make AI Video (tap & wait)", "callback_data": f"v:{vid_id}"}])
     kb.append([{"text": "🔗 Baca Artikel / Read Article", "url": link}])
     reply_markup = {"inline_keyboard": kb}
-    res = tg("sendMessage", {
+    payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
         "parse_mode": "HTML",
         "reply_markup": reply_markup,
         "disable_web_page_preview": False,
-    })
+    }
+    thread_id = news_thread_id(section)
+    if thread_id:
+        payload["message_thread_id"] = thread_id
+    res = tg("sendMessage", payload)
     if res is not None:
         print("Telegram Send Status:", res.status_code)
 
@@ -577,14 +613,24 @@ def send_news_message(title_en, title_bm, published_str, importance_stars, notio
 # ---------------------------------------------------------------------------
 def fetch_and_post_news(minutes_window=1440, max_posts=8):
     translator = GoogleTranslator(source='en', target='ms')
-    feed = feedparser.parse(FEED_URL)
     now = datetime.now(timezone.utc)
     posted_count = 0
     seen_this_run = set()  # guards against duplicates WITHIN a single run
+    feeds = [
+        ("local", feedparser.parse(LOCAL_FEED_URL)),
+        ("international", feedparser.parse(INTERNATIONAL_FEED_URL)),
+    ]
+    # Interleave the two feeds so a busy Malaysian cycle cannot consume the
+    # whole per-run cap before international stories get a chance to post.
+    entries = []
+    longest = max((len(feed.entries) for _, feed in feeds), default=0)
+    for index in range(longest):
+        for section, feed in feeds:
+            if index < len(feed.entries):
+                entries.append((section, feed.entries[index]))
+    print("Entries fetched: " + ", ".join(f"{section}={len(feed.entries)}" for section, feed in feeds))
 
-    print(f"Total entries fetched from Google News RSS: {len(feed.entries)}")
-
-    for entry in feed.entries:
+    for section, entry in entries:
         try:
             title_en = (entry.title or "").strip()
             summary = getattr(entry, 'summary', '')
@@ -636,7 +682,8 @@ def fetch_and_post_news(minutes_window=1440, max_posts=8):
             video_url = push_video_to_notion(title_en, title_bm, link, published_str, date_iso, analysis)
 
             seen_this_run.add(key)
-            send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link, analysis, video_url)
+            send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link,
+                              analysis, video_url, section=section)
             posted_count += 1
             time.sleep(1)  # be gentle with Telegram rate limits
             if posted_count >= max_posts:
@@ -1123,6 +1170,7 @@ def handle_update(u):
         _send(chat_id,
               "⚖️ <b>Malaysian Legal News Bot</b>\n\n"
               "📰 <code>/news</code> — check for the latest news right now\n"
+              "🗂 <code>/setupnews</code> — create separate Local and International news topics\n"
               "🔎 <code>/search YYYY-MM-DD</code> — find past news by date "
               "(e.g. <code>/search 2026-07-15</code>, also accepts <code>15/07/2026</code> or <code>15 July 2026</code>)\n\n"
               "I also post fresh legal news automatically as it breaks.")
@@ -1186,6 +1234,7 @@ def handle_commands():
 def set_commands():
     tg("setMyCommands", {"commands": [
         {"command": "news", "description": "Check for the latest legal news now"},
+        {"command": "setupnews", "description": "Split local and international news into topics"},
         {"command": "search", "description": "Search past legal news by date (e.g. /search 2026-07-15)"},
         {"command": "help", "description": "How to use this bot"},
     ]})
