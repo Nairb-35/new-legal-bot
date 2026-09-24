@@ -1,0 +1,16 @@
+{
+  "dewan_negara": {
+    "name": "Dewan Negara",
+    "feed_url": "https://berita.rtm.gov.my/tag/dewan-negara/feed/",
+    "live_url": "https://rtmklik.rtm.gov.my/live/khas/dewannegara",
+    "agenda_url": "https://www.parlimen.gov.my/aum-dewan-negara.html?uweb=dn&lang=bm",
+    "hansard_url": "https://www.parlimen.gov.my/hansard-dewan-negara.html?uweb=dn&lang=bm"
+  },
+  "dewan_rakyat": {
+    "name": "Dewan Rakyat",
+    "feed_url": "https://berita.rtm.gov.my/tag/dewan-rakyat/feed/",
+    "live_url": "https://rtmklik.rtm.gov.my/live/khas/dewanrakyat",
+    "agenda_url": "https://www.parlimen.gov.my/aum-dewan-rakyat.html?uweb=dr&lang=bm",
+    "hansard_url": "https://www.parlimen.gov.my/hansard-dewan-rakyat.html?uweb=dr&lang=bm"
+  }
+}

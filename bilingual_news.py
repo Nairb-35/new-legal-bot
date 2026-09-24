@@ -7,9 +7,15 @@ import sys
 import json
 import subprocess
 import threading
-from urllib.parse import quote_plus
+import calendar
+from html import unescape
+from html.parser import HTMLParser
+from itertools import zip_longest
+from urllib.parse import quote_plus, urlparse
 from datetime import datetime, timezone, timedelta
 from deep_translator import GoogleTranslator
+from news_history import load_recent_news_history
+from news_policy import classify_geography, canonical_url, normalize_headline, is_duplicate
 
 # The bot borrows your existing LawGPT AI (Gemini via its proxy) to write a REAL,
 # article-specific LENS analysis + video script — no separate API key needed.
@@ -25,6 +31,7 @@ BOT_GH_TOKEN = os.getenv("BOT_GH_TOKEN")  # PAT (Actions secret): lets a dispatc
 
 TELEGRAM_CHAT_ID = "-1004348673663"
 NEWS_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "newscfg.json")
+PARLIAMENT_SOURCES_FILE = os.path.join(os.path.dirname(__file__), "parliament_sources.json")
 # Correct 32-char database id (the old one was missing a character, so every
 # Notion save 404'd — which caused BOTH the repeated news and the broken
 # "page couldn't be found" LENS/Video buttons).
@@ -72,6 +79,20 @@ INTERNATIONAL_FEED_URL = (
 
 # Backwards-compatible name for anything importing the old constant.
 FEED_URL = LOCAL_FEED_URL
+
+# Parliament topics use only RTM's official chamber feeds. General local and
+# international coverage keep their existing sources and analysis pipeline.
+PARLIAMENT_SECTIONS = ("dewan_negara", "dewan_rakyat")
+PARLIAMENT_DEFAULT_SOURCES = {
+    section: {
+        "name": section.replace("_", " ").title(),
+        "feed_url": f"https://berita.rtm.gov.my/tag/{section.replace('_', '-')}/feed/",
+        "live_url": f"https://rtmklik.rtm.gov.my/live/khas/{section.replace('_', '')}",
+        "agenda_url": f"https://www.parlimen.gov.my/aum-{section.replace('_', '-')}.html?uweb={'dn' if section == 'dewan_negara' else 'dr'}&lang=bm",
+        "hansard_url": f"https://www.parlimen.gov.my/hansard-{section.replace('_', '-')}.html?uweb={'dn' if section == 'dewan_negara' else 'dr'}&lang=bm",
+    }
+    for section in PARLIAMENT_SECTIONS
+}
 
 NOTION_HEADERS = {
     "Authorization": f"Bearer {(NOTION_TOKEN or '').strip()}",
@@ -124,8 +145,7 @@ def get_importance_rating(title, summary):
 # ---------------------------------------------------------------------------
 def normalize_title(title):
     """Drop the ' - Publisher' suffix Google News adds, lowercase, collapse spaces."""
-    t = re.sub(r'\s*-\s*[^-]+$', '', title or '')
-    return re.sub(r'\s+', ' ', t).strip().lower()
+    return normalize_headline(title)
 
 
 def tg(method, payload=None, params=None):
@@ -159,6 +179,105 @@ def news_thread_id(section):
         return None
 
 
+def parliament_sources():
+    """Use checked-in official links, with working RTM tag-page fallbacks."""
+    sources = {section: dict(value) for section, value in PARLIAMENT_DEFAULT_SOURCES.items()}
+    try:
+        with open(PARLIAMENT_SOURCES_FILE, "r", encoding="utf-8") as fh:
+            saved = json.load(fh)
+        for section in PARLIAMENT_SECTIONS:
+            if isinstance(saved.get(section), dict):
+                sources[section].update({key: value for key, value in saved[section].items() if value})
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return sources
+
+
+class _ArticleTextParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.hidden = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style"):
+            self.hidden += 1
+        elif tag in ("br", "p", "div", "li"):
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style"):
+            self.hidden = max(0, self.hidden - 1)
+        elif tag in ("p", "div", "li"):
+            self.parts.append(" ")
+
+    def handle_data(self, data):
+        if not self.hidden:
+            self.parts.append(data)
+
+
+def article_plain_text(value):
+    """Decode RSS HTML/entities before classification, translation or analysis."""
+    parser = _ArticleTextParser()
+    parser.feed(unescape(str(value or "")))
+    return re.sub(r"\s+", " ", unescape("".join(parser.parts))).strip()
+
+
+def route_news_section(source_section, title, summary, configured_sections,
+                       authoritative_chamber=False):
+    """A chamber name alone is not evidence of an official Parliament source."""
+    if source_section == "international":
+        return source_section
+    if authoritative_chamber and source_section in configured_sections:
+        return source_section
+    return "local"
+
+
+def is_official_rtm_url(value):
+    """Accept the exact official HTTPS host; reject lookalikes and URL userinfo."""
+    if not isinstance(value, str) or re.search(r"[\x00-\x20\\]", value):
+        return False
+    try:
+        parsed = urlparse(value)
+        return (parsed.scheme == "https" and parsed.hostname == "berita.rtm.gov.my"
+                and parsed.port in (None, 443) and not parsed.username and not parsed.password)
+    except ValueError:
+        return False
+
+
+def parliament_excerpt(value, limit=1600):
+    """A plain excerpt, never a generated summary. Ellipsis marks truncation."""
+    text = article_plain_text(value)
+    return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "…"
+
+
+def bilingual_titles(source_title):
+    """Auto-detect RTM's Malay as well as English headlines; never guess a language.
+
+    Empty outputs mean translation was unavailable. Callers keep a neutral
+    source headline rather than marking the unverified text as English/Malay.
+    """
+    titles = []
+    for target in ("en", "ms"):
+        try:
+            translated = GoogleTranslator(source="auto", target=target).translate(source_title)
+            titles.append(article_plain_text(translated))
+        except Exception:
+            titles.append("")
+    return tuple(titles)
+
+
+def fetch_news_feed(url):
+    """Bound each publisher request so one unavailable feed cannot stall a run."""
+    response = requests.get(url, timeout=(10, 25), headers={
+        "User-Agent": "Mozilla/5.0 (compatible; LegalNewsBot/1.0)",
+    })
+    response.raise_for_status()
+    if is_official_rtm_url(url) and not is_official_rtm_url(response.url):
+        raise ValueError("RTM feed redirected outside the official HTTPS host")
+    return feedparser.parse(response.content)
+
+
 # ---------------------------------------------------------------------------
 # Deduplication  ── THE FIX for repeated news.
 # Google News RSS 'link' is an UNSTABLE redirect URL that changes between
@@ -168,7 +287,7 @@ def news_thread_id(section):
 # ---------------------------------------------------------------------------
 def already_in_notion(title, link):
     if not NOTION_TOKEN:
-        return False
+        raise RuntimeError('News history credentials unavailable; posting paused')
     url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
     payload = {
         "page_size": 1,
@@ -176,17 +295,21 @@ def already_in_notion(title, link):
             "or": [
                 {"property": "Name", "title": {"equals": title[:200]}},
                 {"property": "Source Link", "url": {"equals": link}},
+                {"property": "Source Link", "url": {"equals": canonical_url(link)}},
             ]
         },
     }
     try:
         res = requests.post(url, json=payload, headers=NOTION_HEADERS, timeout=30)
         if res.status_code == 200:
-            return len(res.json().get("results", [])) > 0
+            data = res.json()
+            if not isinstance(data, dict) or not isinstance(data.get('results'), list):
+                raise RuntimeError('Invalid duplicate-check response')
+            return len(data['results']) > 0
         print("Notion dedup query error:", res.status_code, res.text[:300])
     except Exception as e:
         print("Dedup error:", e)
-    return False
+    raise RuntimeError('Duplicate check unavailable; posting paused')
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +319,7 @@ def already_in_notion(title, link):
 #    'Legal News & Interview Prep'. If it's missing, posting still works (it
 #    retries without the date) but date-search will return nothing.
 # ---------------------------------------------------------------------------
-def ai_lens(title, summary):
+def ai_lens(title, summary, section="local"):
     """Ask the LawGPT AI for a SPECIFIC LIF (Legal Insight Framework) analysis +
     video script for this article. Returns a dict, or None on failure (then we
     fall back to a template)."""
@@ -207,10 +330,10 @@ def ai_lens(title, summary):
             "system": (
                 "You are a Malaysian law lecturer and interview coach. Turn ONE news item into a TIGHT, high-signal brief a "
                 "law student can learn in 2–3 minutes. Work only from the headline and short snippet. Be SPECIFIC — never "
-                "generic filler, never restate the headline, no padding. Ground everything in the real Malaysian legal "
-                "framework and name the ACTUAL statutes or constitutional Articles that genuinely apply (e.g. Federal "
-                "Constitution Art 5/8/10, Penal Code, Control of Supplies Act 1961, Criminal Procedure Code, Companies Act "
-                "2016, PDPA 2010). Do NOT invent case citations, fake section numbers, or grand-sounding 'doctrines' that "
+                "generic filler, never restate the headline, no padding. Use ONLY the jurisdiction and facts supported by "
+                "the supplied source. International stories must NOT be recast as Malaysian events or given Malaysian "
+                "statutes. Only name a statute or constitutional Article when the supplied source identifies it; otherwise "
+                "write 'Not identified in the supplied source'. Do NOT invent case citations, fake section numbers, or grand-sounding 'doctrines' that "
                 "may not exist — if there is no established named doctrine, describe the principle in plain terms tied to the "
                 "actual statute (e.g. 'government regulation of essential goods via statutory powers under the Control of "
                 "Supplies Act 1961'), NOT an invented label. Be honest about certainty: separate what the article reports "
@@ -226,7 +349,7 @@ def ai_lens(title, summary):
                 "ratings (object with integer keys legal_impact, interview_value, exam_relevance, public_importance, longterm — each 1–5), "
                 "brief (object with 'facts' (1–2 sentences: what actually happened, as reported), "
                 "'statute' (the specific statute / constitutional Article / legal instrument that governs this — name it precisely, "
-                "e.g. 'Control of Supplies Act 1961' or 'Art 11 Federal Constitution'; if genuinely none yet, say 'No specific statute — governed by common law / general principles'), "
+                "only if the supplied source names it; otherwise say 'Not identified in the supplied source'), "
                 "and 'importance' (1–2 sentences: why it matters legally)), "
                 "breakdown (object with 'principle' (the law behind this, grounded in a real statute/Article, NO invented doctrine names), "
                 "'interests' (the competing values/interests in tension, one line), 'impact' (who is actually affected in practice, one line)), "
@@ -248,7 +371,7 @@ def ai_lens(title, summary):
                 "hashtags (array of 5–7 short hashtag strings without spaces), "
                 "title (string, a catchy <= 60 char video title))."
             ),
-            "messages": [{"role": "user", "content": f"Headline: {title}\nSnippet: {summary or '(no snippet available)'}"}],
+            "messages": [{"role": "user", "content": f"News section: {section}\nHeadline: {title}\nSnippet: {summary or '(no snippet available)'}"}],
         }
         res = requests.post(AI_ENDPOINT, json=body,
                             headers={"Content-Type": "application/json", "Origin": AI_ORIGIN},
@@ -566,9 +689,63 @@ def _esc(t):
     return str(t or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def push_parliament_to_notion(source_title, excerpt, link, published_str, date_iso, section):
+    """Archive the original RTM source for deduplication, without generated claims."""
+    if not NOTION_TOKEN or not is_official_rtm_url(link):
+        return None
+    blocks = [
+        _h1(source_title),
+        _p(f"{parliament_sources()[section]['name']} | Sumber: Berita RTM"),
+        _p(f"Tarikh penerbitan: {published_str}"),
+        _p(f"Artikel asal: {link}"),
+    ]
+    if excerpt:
+        blocks.extend([_h2("Petikan sumber asal"), _q(parliament_excerpt(excerpt))])
+    return _create_page(source_title, link, date_iso, blocks)
+
+
+def send_parliament_message(source_title, excerpt, published_str, link, section):
+    """Post only original official wording and direct official reference links."""
+    thread_id = news_thread_id(section)
+    if not thread_id or not source_title or not is_official_rtm_url(link):
+        print(f"Parliament source/topic not verified — not sending: {section}")
+        return
+    source = parliament_sources()[section]
+    lines = [
+        f"🏛 <b>{_esc(source['name'])}</b>",
+        f"<b>{_esc(source_title[:600])}</b>",
+        "📡 <b>Sumber:</b> Berita RTM",
+        f"📅 {_esc(published_str)}",
+    ]
+    if excerpt:
+        lines.extend(["", "<b>Petikan sumber asal:</b>", _esc(parliament_excerpt(excerpt))])
+    buttons = [
+        [{"text": "📰 Artikel asal • Berita RTM", "url": link}],
+        [{"text": "📺 Tonton di RTMKlik", "url": source["live_url"]}],
+        [{"text": "🗓 Aturan Urusan Mesyuarat", "url": source["agenda_url"]},
+         {"text": "📄 Hansard rasmi", "url": source["hansard_url"]}],
+    ]
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": "\n".join(lines), "parse_mode": "HTML",
+               "reply_markup": {"inline_keyboard": buttons}, "disable_web_page_preview": False}
+    # Saved General topic id 1 is addressed by omitting message_thread_id.
+    if thread_id != 1:
+        payload["message_thread_id"] = thread_id
+    res = tg("sendMessage", payload)
+    if res is not None:
+        print("Telegram Parliament Send Status:", res.status_code)
+    return res
+
+
 def send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link,
-                      analysis=None, video_url=None, section="local"):
+                      analysis=None, video_url=None, section="local", source_title=None,
+                      source_excerpt=None):
+    if section in PARLIAMENT_SECTIONS:
+        return send_parliament_message(source_title, source_excerpt, published_str, link, section)
+    thread_id = news_thread_id(section)
     # Progressive disclosure: the concise 2-3 min read lives in the Telegram
+    if not thread_id:
+        print(f'News destination missing; not sending to another topic: {section}')
+        return
     # message itself (snapshot + lens + 60-second read + ratings); the buttons
     # deep-link to the full Notion page for interview prep / video / deep analysis.
     a = analysis or {}
@@ -577,10 +754,15 @@ def send_news_message(title_en, title_bm, published_str, importance_stars, notio
     r = a.get("ratings", {}) or {}
     lens_emoji, lens_label = _lens_badge(lens)
 
-    lines = [
-        f"🇬🇧 <b>{_esc(title_en)}</b>",
-        f"🇲🇾 <i>{_esc(title_bm)}</i>",
-    ]
+    lines = []
+    if title_en:
+        lines.append(f"🇬🇧 <b>{_esc(title_en)}</b>")
+        if title_bm:
+            lines.append(f"🇲🇾 <i>{_esc(title_bm)}</i>")
+    elif title_bm:
+        lines.append(f"🇲🇾 <b>{_esc(title_bm)}</b>")
+    else:
+        lines.append(f"📰 <b>{_esc(source_title)}</b>")
     if lens_label:
         lines.append(f"{lens_emoji} <b>Legal Lens:</b> {_esc(lens_label)}")
     lines.append(f"📅 {_esc(published_str)}")
@@ -626,8 +808,10 @@ def send_news_message(title_en, title_bm, published_str, importance_stars, notio
         "reply_markup": reply_markup,
         "disable_web_page_preview": False,
     }
-    thread_id = news_thread_id(section)
-    if thread_id:
+    # Telegram's General topic is represented by saved topic id 1, but the
+    # sendMessage API addresses it by omitting message_thread_id. This also
+    # applies when General has been renamed to Dewan Rakyat.
+    if thread_id and thread_id != 1:
         payload["message_thread_id"] = thread_id
     res = tg("sendMessage", payload)
     if res is not None:
@@ -637,85 +821,174 @@ def send_news_message(title_en, title_bm, published_str, importance_stars, notio
 # ---------------------------------------------------------------------------
 # Main news pipeline
 # ---------------------------------------------------------------------------
-def fetch_and_post_news(minutes_window=1440, max_posts=12, local_max_posts=8,
-                        international_max_posts=4):
-    translator = GoogleTranslator(source='en', target='ms')
+def fetch_and_post_news(minutes_window=1440, max_posts=20, local_max_posts=8,
+                        international_max_posts=4, dewan_negara_max_posts=4,
+                        dewan_rakyat_max_posts=4):
     now = datetime.now(timezone.utc)
+    try:
+        if not NOTION_TOKEN:
+            raise RuntimeError('News history credentials unavailable')
+        history = load_recent_news_history(requests.post, NOTION_DATABASE_ID, NOTION_HEADERS)
+    except Exception as exc:
+        print(f'Posting paused to avoid repeats: {exc}')
+        return 0
     posted_count = 0
     seen_this_run = set()  # guards against duplicates WITHIN a single run
-    feeds = [("local", feedparser.parse(url)) for url in LOCAL_FEED_URLS]
-    feeds.append(("international", feedparser.parse(INTERNATIONAL_FEED_URL)))
-    # Interleave the two feeds so a busy Malaysian cycle cannot consume the
-    # whole per-run cap before international stories get a chance to post.
-    entries = []
-    longest = max((len(feed.entries) for _, feed in feeds), default=0)
-    for index in range(longest):
-        for section, feed in feeds:
-            if index < len(feed.entries):
-                entries.append((section, feed.entries[index]))
-    print("Entries fetched: " + ", ".join(f"{section}={len(feed.entries)}" for section, feed in feeds))
+    seen_links = set()
+    configured_sections = {section for section in PARLIAMENT_SECTIONS if news_thread_id(section)}
+    # Do not fetch dedicated Parliament feeds until their own topics exist;
+    # missing setup must never dump the new feeds into General.
+    sources = parliament_sources()
+    feed_specs = [("local", url, False) for url in LOCAL_FEED_URLS]
+    feed_specs.append(("international", INTERNATIONAL_FEED_URL, False))
+    for section in PARLIAMENT_SECTIONS:
+        if section in configured_sections:
+            url = sources[section]["feed_url"]
+            if is_official_rtm_url(url):
+                feed_specs.append((section, url, True))
+            else:
+                print(f"Unofficial Parliament feed rejected: {section}")
+    feeds = []
+    for section, url, authoritative in feed_specs:
+        try:
+            feed = fetch_news_feed(url)
+            feed_entries = list(feed.entries)
+            if authoritative:
+                feed_entries = [entry for entry in feed_entries
+                                if is_official_rtm_url(getattr(entry, "link", None))]
+            feeds.append((section, feed_entries, authoritative))
+        except Exception as exc:
+            print(f"News feed unavailable ({section}): {exc}")
+    print("Entries fetched: " + ", ".join(f"{section}={len(entries)}" for section, entries, _ in feeds))
     section_limits = {
         "local": local_max_posts,
         "international": international_max_posts,
+        "dewan_negara": dewan_negara_max_posts,
+        "dewan_rakyat": dewan_rakyat_max_posts,
     }
-    section_counts = {"local": 0, "international": 0}
+    section_counts = {section: 0 for section in section_limits}
+    queues = {section: [] for section in section_limits}
+    tagged_chambers = {}
+    tagged_entries = {}
+    for section, feed_entries, authoritative in feeds:
+        if not authoritative:
+            continue
+        for entry in feed_entries:
+            key = normalize_title(article_plain_text(getattr(entry, "title", "")))
+            if key:
+                tagged_chambers.setdefault(("title", key), set()).add(section)
+                tagged_entries[(section, "title", key)] = entry
+            link = getattr(entry, "link", "")
+            if link:
+                tagged_chambers.setdefault(("url", link), set()).add(section)
+                tagged_entries[(section, "url", link)] = entry
+    # First interleave publishers, then interleave the final destinations.
+    # Multiple local feeds cannot starve the other three topics of their quota.
+    for batch in zip_longest(*(entries for _, entries, _ in feeds)):
+        for (source_section, _, authoritative), entry in zip(feeds, batch):
+            if entry is None:
+                continue
+            title = article_plain_text(getattr(entry, "title", ""))
+            summary = article_plain_text(getattr(entry, "summary", ""))
+            section = route_news_section(source_section, title, summary, configured_sections,
+                                         authoritative_chamber=authoritative)
+            # The same RTM story can also surface in Google News without its
+            # chamber name. Its verified tag should decide its destination even
+            # when the local-feed copy is encountered first.
+            tagged = (tagged_chambers.get(("title", normalize_title(title)), set()) |
+                      tagged_chambers.get(("url", getattr(entry, "link", "")), set()))
+            if tagged:
+                section = next(iter(tagged)) if len(tagged) == 1 else "local"
+                if section in PARLIAMENT_SECTIONS:
+                    # A local-news match is only a lookup hint. Every factual
+                    # field and the article URL must come from the RTM record.
+                    entry = (tagged_entries.get((section, "url", getattr(entry, "link", ""))) or
+                             tagged_entries[(section, "title", normalize_title(title))])
+                    title = article_plain_text(getattr(entry, "title", ""))
+                    summary = article_plain_text(getattr(entry, "summary", ""))
+            if section not in PARLIAMENT_SECTIONS and not tagged:
+                section = classify_geography(title, summary, getattr(entry, 'link', ''))
+                if section is None:
+                    print(f'Geography unclear; held back: {title}')
+                    continue
+            queues[section].append((entry, title, summary))
+    entries = [(section, candidate)
+               for batch in zip_longest(*queues.values())
+               for section, candidate in zip(queues, batch) if candidate is not None]
 
-    for section, entry in entries:
+    for section, (entry, source_title, summary) in entries:
         try:
+            if posted_count >= max_posts:
+                break
             if section_counts[section] >= section_limits[section]:
                 continue
-            title_en = (entry.title or "").strip()
-            summary = getattr(entry, 'summary', '')
             link = entry.link
 
-            if not is_genuinely_legal_or_political(title_en, summary):
+            if section not in PARLIAMENT_SECTIONS and not is_genuinely_legal_or_political(source_title, summary):
                 continue
 
-            key = normalize_title(title_en)
-            if not key or key in seen_this_run:
+            key = normalize_title(source_title)
+            if not key or key in seen_this_run or canonical_url(link) in seen_links or is_duplicate(source_title, link, history):
                 continue
 
             # Time window + date
-            date_iso = now.strftime("%Y-%m-%d")
-            published_str = "Today"
+            is_parliament = section in PARLIAMENT_SECTIONS
+            date_iso = None if is_parliament else now.strftime("%Y-%m-%d")
+            published_str = "Tarikh penerbitan tidak dinyatakan" if is_parliament else "Today"
             if getattr(entry, 'published_parsed', None):
-                pub = datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
+                pub = datetime.fromtimestamp(calendar.timegm(entry.published_parsed), tz=timezone.utc)
                 if now - pub > timedelta(minutes=minutes_window):
                     continue
                 published_str = pub.strftime("%d %B %Y")
                 date_iso = pub.strftime("%Y-%m-%d")
+                if is_parliament:
+                    pub_myt = pub.astimezone(timezone(timedelta(hours=8)))
+                    published_str = pub_myt.strftime("%d %B %Y, %H:%M MYT")
+                    date_iso = pub_myt.strftime("%Y-%m-%d")
 
             # Persistent de-dupe against Notion (fixes the repeats)
-            if already_in_notion(title_en, link):
+            if already_in_notion(source_title, link):
                 seen_this_run.add(key)
+                seen_links.add(canonical_url(link))
                 continue
 
-            importance_stars = get_importance_rating(title_en, summary)
-            try:
-                title_bm = translator.translate(title_en) or title_en
-            except Exception:
-                title_bm = title_en
-
-            # Generate a REAL, article-specific LENS analysis + video script (falls
-            # back to a template if the AI is unreachable).
-            analysis = ai_lens(title_en, summary)
-
-            # Save to Notion FIRST. Only if that succeeds do we send to Telegram and
-            # mark it seen — so a Notion failure can never produce a duplicate post or
-            # a broken button link; it simply retries on the next run.
-            notion_url = push_to_notion(title_en, title_bm, link, published_str, date_iso, importance_stars, analysis)
+            title_en = title_bm = importance_stars = ""
+            analysis = video_url = None
+            if is_parliament:
+                # Official-source posts never pass through AI, translation,
+                # ratings, invented statute templates, or the video pipeline.
+                notion_url = push_parliament_to_notion(source_title, summary, link,
+                                                      published_str, date_iso, section)
+            else:
+                importance_stars = get_importance_rating(source_title, summary)
+                title_en, title_bm = bilingual_titles(source_title)
+                saved_title = title_en or source_title
+                if saved_title != source_title and (is_duplicate(saved_title, link, history) or already_in_notion(saved_title, link)):
+                    seen_this_run.add(key)
+                    seen_links.add(canonical_url(link))
+                    continue
+                analysis = ai_lens(saved_title, summary, section=section)
+                notion_url = push_to_notion(saved_title, title_bm or "Terjemahan tidak tersedia.", link,
+                                            published_str, date_iso, importance_stars, analysis)
             if not notion_url:
-                print(f"Notion save failed — not posting (will retry next run): {title_en}")
+                print(f"Notion save failed — not posting (will retry next run): {source_title}")
                 continue
 
             # Separate page for the video script so its Telegram button opens the
             # video (not the analysis). Best-effort: if it fails, the video button
             # falls back to the analysis page.
-            video_url = push_video_to_notion(title_en, title_bm, link, published_str, date_iso, analysis)
+            if not is_parliament:
+                video_url = push_video_to_notion(saved_title, title_bm or "Terjemahan tidak tersedia.", link,
+                                                published_str, date_iso, analysis)
 
             seen_this_run.add(key)
+            seen_links.add(canonical_url(link))
+            history.append({'title': source_title, 'link': link})
+            if not is_parliament and saved_title != source_title:
+                history.append({'title': saved_title, 'link': link})
             send_news_message(title_en, title_bm, published_str, importance_stars, notion_url, link,
-                              analysis, video_url, section=section)
+                              analysis, video_url, section=section, source_title=source_title,
+                              source_excerpt=summary)
             posted_count += 1
             section_counts[section] += 1
             time.sleep(1)  # be gentle with Telegram rate limits
@@ -725,8 +998,8 @@ def fetch_and_post_news(minutes_window=1440, max_posts=12, local_max_posts=8,
         except Exception as _e:
             print(f"Skipping one article due to error: {_e}")
             continue
-    print(f"Posted {posted_count} new article(s): local={section_counts['local']}, "
-          f"international={section_counts['international']}.")
+    print(f"Posted {posted_count} new article(s): " + ", ".join(
+        f"{section}={count}" for section, count in section_counts.items()) + ".")
     return posted_count
 
 
@@ -1205,6 +1478,7 @@ def handle_update(u):
               "⚖️ <b>Malaysian Legal News Bot</b>\n\n"
               "📰 <code>/news</code> — check for the latest news right now\n"
               "🗂 <code>/setupnews</code> — create separate Local and International news topics\n"
+              "🏛 <code>/setupparliament</code> — create Dewan Negara and Dewan Rakyat topics with RTM links\n"
               "🔎 <code>/search YYYY-MM-DD</code> — find past news by date "
               "(e.g. <code>/search 2026-07-15</code>, also accepts <code>15/07/2026</code> or <code>15 July 2026</code>)\n\n"
               "I also post fresh legal news automatically as it breaks.")
@@ -1269,6 +1543,7 @@ def set_commands():
     tg("setMyCommands", {"commands": [
         {"command": "news", "description": "Check for the latest legal news now"},
         {"command": "setupnews", "description": "Split local and international news into topics"},
+        {"command": "setupparliament", "description": "Create Dewan Negara and Dewan Rakyat topics"},
         {"command": "search", "description": "Search past legal news by date (e.g. /search 2026-07-15)"},
         {"command": "help", "description": "How to use this bot"},
     ]})

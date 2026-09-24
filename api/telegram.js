@@ -18,6 +18,8 @@ const GH = process.env.BOT_GH_TOKEN;
 const REPO = process.env.BOT_REPO || 'Nairb-35/new-legal-bot';
 const VIDEO_CHAT = process.env.VIDEO_CHAT_ID;   // if set, finished videos go to THIS chat, not the news group
 const VIDEO_TOPIC = process.env.VIDEO_TOPIC_ID; // if set, videos go to this forum topic (thread) within the chat
+const { setupParliament } = require('../lib/parliament');
+const { deriveWebhookSecret, verifyTelegramWebhook } = require('../lib/telegram-auth');
 
 async function tg(method, body) {
   const r = await fetch(`https://api.telegram.org/bot${TG}/${method}`, {
@@ -59,6 +61,30 @@ async function ghDelete(path) {
     const sha = (await g.json()).sha;
     await fetch(url, { method: 'DELETE', headers: ghHeaders, body: JSON.stringify({ message: 'rm ' + path, sha, branch: 'main' }) });
   } catch (e) {}
+}
+
+async function ghPatchNewsConfig(chat, patch, expected = {}) {
+  const url = `https://api.github.com/repos/${REPO}/contents/newscfg.json`;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const get = await fetch(url + '?ref=main', { headers: ghHeaders });
+    if (!get.ok) throw new Error('Could not read the saved news destinations.');
+    const current = await get.json();
+    const cfg = JSON.parse(Buffer.from(current.content, 'base64').toString('utf8'));
+    if (String(cfg.chat_id) !== String(chat)) throw new Error('The configured news group changed.');
+    for (const [key, value] of Object.entries(expected)) {
+      if (JSON.stringify(cfg[key] ?? null) !== JSON.stringify(value ?? null)) {
+        throw new Error('Parliament setup changed concurrently; wait before retrying.');
+      }
+    }
+    const next = { ...cfg, ...patch };
+    const put = await fetch(url, { method: 'PUT', headers: ghHeaders, body: JSON.stringify({
+      message: 'configure Parliament topics', branch: 'main', sha: current.sha,
+      content: Buffer.from(JSON.stringify(next)).toString('base64'),
+    }) });
+    if (put.ok) return next;
+    if (put.status !== 409) throw new Error('Could not save the Parliament destination.');
+  }
+  throw new Error('News settings changed concurrently; retry the setup.');
 }
 
 // Reserve a monotonically increasing ID for each video. The ID is persisted in
@@ -199,17 +225,16 @@ function readRaw(req) {
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
-    // Self-setup: visiting /api/telegram?setup=1 points Telegram's webhook at
-    // this URL using the bot token already stored in Vercel env — no need to
-    // paste the token into a browser. ?setup=off removes it.
+    // Idempotent registration to this bot's fixed production destination.
+    // Never accept a caller-controlled Host as the webhook destination.
     try {
-      const q = req.url || '';
-      if (q.includes('setup=1')) {
-        const r = await tg('setWebhook', { url: `https://${req.headers.host}/api/telegram` });
-        res.status(200).json(r); return;
-      }
-      if (q.includes('setup=off')) {
-        const r = await tg('deleteWebhook', {});
+      const q = new URL(req.url || '/', 'https://new-legal-bot.vercel.app').searchParams;
+      if (q.get('setup') === '1') {
+        const secret = deriveWebhookSecret(TG);
+        if (!secret) { res.status(503).json({ ok: false }); return; }
+        const r = await tg('setWebhook', {
+          url: 'https://new-legal-bot.vercel.app/api/telegram', secret_token: secret,
+        });
         res.status(200).json(r); return;
       }
     } catch (e) {}
@@ -217,6 +242,12 @@ module.exports = async (req, res) => {
   }
   let u = req.body;
   if (!u || typeof u !== 'object') { try { u = JSON.parse(await readRaw(req)); } catch (e) { u = {}; } }
+  // Migration stage 1: existing commands remain available until Telegram has
+  // received its secret. New privileged setup is authenticated from day one.
+  if (/^\/(setupparliament|setparliament)(?:@\w+)?(?:\s|$)/i.test(u.message?.text || '') &&
+      !verifyTelegramWebhook(req.headers, TG)) {
+    res.status(401).json({ ok: false }); return;
+  }
   try {
     // De-dupe one tap that fires twice: key by (button message + action), or by
     // (chat + command text) for messages, within a short window.
@@ -286,6 +317,15 @@ module.exports = async (req, res) => {
           const desc = (r && r.description) || 'unknown error';
           await tg('sendMessage', { chat_id: chat, text: '⚠️ Couldn\'t create the topic: ' + desc + '\nMake sure Topics is ON and I am an admin with Manage Topics, then retry /setupexplainers.' });
         }
+      } else if (/^\/(setupparliament|setparliament)(?:@\w+)?(?:\s|$)/.test(low)) {
+        const command = low.split(/\s+/)[0].split('@')[0];
+        const arg = low.split(/\s+/)[1];
+        const adoptSection = command === '/setparliament'
+          ? ({ negara: 'dewan_negara', rakyat: 'dewan_rakyat' }[arg] || 'invalid') : undefined;
+        await setupParliament({
+          message: msg, tg, loadConfig: () => ghGetJson('newscfg.json'),
+          savePatch: (patch, expected) => ghPatchNewsConfig(chat, patch, expected), adoptSection,
+        });
       } else if (low.startsWith('/setupnews')) {
         // Idempotently create and remember separate destinations for the two
         // news feeds. Saving after each creation prevents duplicate topics if
@@ -350,11 +390,14 @@ module.exports = async (req, res) => {
           await tg('sendMessage', { chat_id: chat, message_thread_id: msg.message_thread_id, text: 'Usage:\n/toon on — kampung cartoon backgrounds\n/toon off — real stock footage' });
         }
       } else if (low.startsWith('/news')) {
-        await tg('sendMessage', { chat_id: chat, text: '🔍 Checking for the latest legal news…' });
+        const newsCfg = await ghGetJson('newscfg.json');
+        const statusThread = msg.message_thread_id || newsCfg?.local_thread_id;
+        await tg('sendMessage', { chat_id: chat, ...(statusThread && Number(statusThread) !== 1
+          ? { message_thread_id: statusThread } : {}), text: '🔍 Checking for the latest legal news…' });
         await ghPut('job.json', { type: 'news', chat_id: chat, ts: Math.floor(Date.now() / 1000) }, 'news job');
         await ghDispatch();
       } else if (low.startsWith('/help') || low.startsWith('/start')) {
-        await tg('sendMessage', { chat_id: chat, text: '⚖️ Legal News Bot\n/news — latest news now\n/setupnews — split local and international news into topics\n/hidegeneral — hide the built-in General topic\n/vtest — test the AI video maker\n/explain <topic> — explainer video\n/toon on|off — cartoon vs real-footage style' });
+        await tg('sendMessage', { chat_id: chat, message_thread_id: msg.message_thread_id, text: '⚖️ Legal News Bot\n/news — latest news now\n/setupnews — split local and international news into topics\n/setupparliament — separate Dewan Negara and Dewan Rakyat, with RTM links\n/hidegeneral — hide the built-in General topic\n/vtest — test the AI video maker\n/explain <topic> — explainer video\n/toon on|off — cartoon vs real-footage style' });
       } else if (low.startsWith('/id')) {
         const tid = msg.message_thread_id;
         await tg('sendMessage', {
