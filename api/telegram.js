@@ -240,14 +240,13 @@ module.exports = async (req, res) => {
     } catch (e) {}
     res.status(200).send('ok'); return;
   }
-  let u = req.body;
-  if (!u || typeof u !== 'object') { try { u = JSON.parse(await readRaw(req)); } catch (e) { u = {}; } }
-  // Migration stage 1: existing commands remain available until Telegram has
-  // received its secret. New privileged setup is authenticated from day one.
-  if (/^\/(setupparliament|setparliament)(?:@\w+)?(?:\s|$)/i.test(u.message?.text || '') &&
-      !verifyTelegramWebhook(req.headers, TG)) {
+  // Telegram registration has been verified; authenticate every update before
+  // reading its body or making any Telegram/GitHub changes.
+  if (!verifyTelegramWebhook(req.headers, TG)) {
     res.status(401).json({ ok: false }); return;
   }
+  let u = req.body;
+  if (!u || typeof u !== 'object') { try { u = JSON.parse(await readRaw(req)); } catch (e) { u = {}; } }
   try {
     // De-dupe one tap that fires twice: key by (button message + action), or by
     // (chat + command text) for messages, within a short window.

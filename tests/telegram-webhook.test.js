@@ -41,7 +41,7 @@ test('verified Telegram update is accepted', async () => {
   await handler({ method: 'POST', headers: { 'x-telegram-bot-api-secret-token': deriveWebhookSecret(fakeToken) }, body: {} }, res);
   assert.equal(res.statusCode, 200);
 });
-test('migration release keeps existing unsigned help commands working', async () => {
+test('after registration all unsigned commands are rejected without side effects', async () => {
   const methods = [];
   global.fetch = async (url, options = {}) => {
     if (url.includes('api.telegram.org')) {
@@ -52,6 +52,6 @@ test('migration release keeps existing unsigned help commands working', async ()
   };
   const res = response();
   await handler({ method: 'POST', headers: {}, body: { message: { text: '/help', chat: { id: 123 } } } }, res);
-  assert.equal(res.statusCode, 200);
-  assert.deepEqual(methods, ['sendMessage']);
+  assert.equal(res.statusCode, 401);
+  assert.deepEqual(methods, []);
 });
